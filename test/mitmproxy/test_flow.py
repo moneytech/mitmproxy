@@ -1,17 +1,14 @@
 import io
+
 import pytest
 
-from mitmproxy.test import tflow
 import mitmproxy.io
+from mitmproxy import flow
 from mitmproxy import flowfilter
 from mitmproxy import options
-from mitmproxy.proxy import config
-from mitmproxy.io import tnetstring
 from mitmproxy.exceptions import FlowReadException
-from mitmproxy import flow
-from mitmproxy import http
-from mitmproxy.proxy.server import DummyServer
-from mitmproxy import master
+from mitmproxy.io import tnetstring
+from mitmproxy.test import taddons, tflow
 from . import tservers
 
 
@@ -32,7 +29,7 @@ class TestSerialize:
 
         f2 = l[0]
         assert f2.get_state() == f.get_state()
-        assert f2.request == f.request
+        assert f2.request.data == f.request.data
         assert f2.marked
 
     def test_filter(self):
@@ -84,55 +81,65 @@ class TestSerialize:
         with pytest.raises(Exception, match="version"):
             list(r.stream())
 
+    def test_copy(self):
+        """
+        _backup may be shared across instances. That should not raise errors.
+        """
+        f = tflow.tflow()
+        f.backup()
+        f.request.path = "/foo"
+        f2 = f.copy()
+        f2.revert()
+        f.revert()
+
 
 class TestFlowMaster:
-    def test_load_flow_reverse(self):
-        s = tservers.TestState()
+    @pytest.mark.asyncio
+    async def test_load_http_flow_reverse(self):
         opts = options.Options(
             mode="reverse:https://use-this-domain"
         )
-        conf = config.ProxyConfig(opts)
-        fm = master.Master(opts, DummyServer(conf))
-        fm.addons.add(s)
-        f = tflow.tflow(resp=True)
-        fm.load_flow(f)
-        assert s.flows[0].request.host == "use-this-domain"
-
-    def test_replay(self):
-        fm = master.Master(None, DummyServer())
-        f = tflow.tflow(resp=True)
-        f.request.content = None
-        with pytest.raises(Exception, match="missing"):
-            fm.replay_request(f)
-
-        f.intercepted = True
-        with pytest.raises(Exception, match="intercepted"):
-            fm.replay_request(f)
-
-        f.live = True
-        with pytest.raises(Exception, match="live"):
-            fm.replay_request(f)
-
-    def test_all(self):
         s = tservers.TestState()
-        fm = master.Master(None, DummyServer())
-        fm.addons.add(s)
-        f = tflow.tflow(req=None)
-        fm.addons.handle_lifecycle("clientconnect", f.client_conn)
-        f.request = http.HTTPRequest.wrap(mitmproxy.test.tutils.treq())
-        fm.addons.handle_lifecycle("request", f)
-        assert len(s.flows) == 1
+        with taddons.context(s, options=opts) as ctx:
+            f = tflow.tflow(resp=True)
+            await ctx.master.load_flow(f)
+            assert s.flows[0].request.host == "use-this-domain"
 
-        f.response = http.HTTPResponse.wrap(mitmproxy.test.tutils.tresp())
-        fm.addons.handle_lifecycle("response", f)
-        assert len(s.flows) == 1
+    @pytest.mark.asyncio
+    async def test_load_websocket_flow(self):
+        opts = options.Options(
+            mode="reverse:https://use-this-domain"
+        )
+        s = tservers.TestState()
+        with taddons.context(s, options=opts) as ctx:
+            f = tflow.twebsocketflow()
+            await ctx.master.load_flow(f.handshake_flow)
+            await ctx.master.load_flow(f)
+            assert s.flows[0].request.host == "use-this-domain"
+            assert s.flows[1].handshake_flow == f.handshake_flow
+            assert len(s.flows[1].messages) == len(f.messages)
 
-        fm.addons.handle_lifecycle("clientdisconnect", f.client_conn)
+    @pytest.mark.asyncio
+    async def test_all(self):
+        opts = options.Options(
+            mode="reverse:https://use-this-domain"
+        )
+        s = tservers.TestState()
+        with taddons.context(s, options=opts) as ctx:
+            f = tflow.tflow(req=None)
+            await ctx.master.addons.handle_lifecycle("clientconnect", f.client_conn)
+            f.request = mitmproxy.test.tutils.treq()
+            await ctx.master.addons.handle_lifecycle("request", f)
+            assert len(s.flows) == 1
 
-        f.error = flow.Error("msg")
-        fm.addons.handle_lifecycle("error", f)
+            f.response = mitmproxy.test.tutils.tresp()
+            await ctx.master.addons.handle_lifecycle("response", f)
+            assert len(s.flows) == 1
 
-        fm.shutdown()
+            await ctx.master.addons.handle_lifecycle("clientdisconnect", f.client_conn)
+
+            f.error = flow.Error("msg")
+            await ctx.master.addons.handle_lifecycle("error", f)
 
 
 class TestError:

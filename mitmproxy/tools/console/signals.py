@@ -1,16 +1,5 @@
 import blinker
 
-# Show a status message in the action bar
-sig_add_log = blinker.Signal()
-
-
-def add_log(e, level):
-    sig_add_log.send(
-        None,
-        e=e,
-        level=level
-    )
-
 
 # Show a status message in the action bar
 status_message = blinker.Signal()
@@ -33,9 +22,6 @@ call_in = blinker.Signal()
 # Focus the body, footer or header of the main window
 focus = blinker.Signal()
 
-# Set the mini help text in the footer of the main window
-footer_help = blinker.Signal()
-
 # Fired when settings change
 update_settings = blinker.Signal()
 
@@ -48,4 +34,6 @@ flowlist_change = blinker.Signal()
 # Pop and push view state onto a stack
 pop_view_state = blinker.Signal()
 push_view_state = blinker.Signal()
-replace_view_state = blinker.Signal()
+
+# Fired when the key bindings change
+keybindings_change = blinker.Signal()

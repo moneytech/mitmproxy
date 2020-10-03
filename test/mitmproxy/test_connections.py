@@ -1,5 +1,4 @@
 import socket
-import os
 import threading
 import ssl
 import OpenSSL
@@ -11,7 +10,6 @@ from mitmproxy import exceptions
 from mitmproxy.net import tcp
 from mitmproxy.net.http import http1
 from mitmproxy.test import tflow
-from mitmproxy.test import tutils
 from .net import tservers
 from pathod import test
 
@@ -30,7 +28,7 @@ class TestClientConnection:
 
     def test_repr(self):
         c = tflow.tclient_conn()
-        assert 'address:22' in repr(c)
+        assert '127.0.0.1:22' in repr(c)
         assert 'ALPN' in repr(c)
         assert 'TLS' not in repr(c)
 
@@ -39,13 +37,16 @@ class TestClientConnection:
         assert 'ALPN' not in repr(c)
         assert 'TLS' in repr(c)
 
+        c.address = None
+        assert repr(c)
+
     def test_tls_established_property(self):
         c = tflow.tclient_conn()
         c.tls_established = True
-        assert c.ssl_established
+        assert c.tls_established
         assert c.tls_established
         c.tls_established = False
-        assert not c.ssl_established
+        assert not c.tls_established
         assert not c.tls_established
 
     def test_make_dummy(self):
@@ -111,13 +112,16 @@ class TestServerConnection:
         c.tls_established = False
         assert 'TLS' not in repr(c)
 
+        c.address = None
+        assert repr(c)
+
     def test_tls_established_property(self):
         c = tflow.tserver_conn()
         c.tls_established = True
-        assert c.ssl_established
+        assert c.tls_established
         assert c.tls_established
         c.tls_established = False
-        assert not c.ssl_established
+        assert not c.tls_established
         assert not c.tls_established
 
     def test_make_dummy(self):
@@ -140,22 +144,23 @@ class TestServerConnection:
         assert d.last_log()
 
         c.finish()
+        c.close()
         d.shutdown()
 
     def test_terminate_error(self):
         d = test.Daemon()
         c = connections.ServerConnection((d.IFACE, d.port))
         c.connect()
+        c.close()
         c.connection = mock.Mock()
         c.connection.recv = mock.Mock(return_value=False)
         c.connection.flush = mock.Mock(side_effect=exceptions.TcpDisconnect)
-        c.finish()
         d.shutdown()
 
     def test_sni(self):
         c = connections.ServerConnection(('', 1234))
-        with pytest.raises(ValueError, matches='sni must be str, not '):
-            c.establish_ssl(None, b'foobar')
+        with pytest.raises(ValueError, match='sni must be str, not '):
+            c.establish_tls(sni=b'foobar')
 
     def test_state(self):
         c = tflow.tserver_conn()
@@ -179,7 +184,7 @@ class TestClientConnectionTLS:
         None,
         "example.com"
     ])
-    def test_tls_with_sni(self, sni):
+    def test_tls_with_sni(self, sni, tdata):
         address = ('127.0.0.1', 0)
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -194,22 +199,29 @@ class TestClientConnectionTLS:
             s = socket.create_connection(address)
             s = ctx.wrap_socket(s, server_hostname=sni)
             s.send(b'foobar')
-            s.shutdown(socket.SHUT_RDWR)
+            # we need to wait for the test to finish successfully before calling .close() on Windows.
+            # The workaround here is to signal completion by sending data the other way around.
+            s.recv(3)
+            s.close()
         threading.Thread(target=client_run).start()
 
         connection, client_address = sock.accept()
         c = connections.ClientConnection(connection, client_address, None)
 
-        cert = tutils.test_data.path("mitmproxy/net/data/server.crt")
+        cert = tdata.path("mitmproxy/net/data/server.crt")
+        with open(tdata.path("mitmproxy/net/data/server.key")) as f:
+            raw_key = f.read()
         key = OpenSSL.crypto.load_privatekey(
             OpenSSL.crypto.FILETYPE_PEM,
-            open(tutils.test_data.path("mitmproxy/net/data/server.key"), "rb").read())
-        c.convert_to_ssl(cert, key)
+            raw_key)
+        c.convert_to_tls(cert, key)
         assert c.connected()
         assert c.sni == sni
         assert c.tls_established
         assert c.rfile.read(6) == b'foobar'
+        c.wfile.send(b"foo")
         c.finish()
+        sock.close()
 
 
 class TestServerConnectionTLS(tservers.ServerTestBase):
@@ -219,17 +231,18 @@ class TestServerConnectionTLS(tservers.ServerTestBase):
         def handle(self):
             self.finish()
 
-    @pytest.mark.parametrize("clientcert", [
+    @pytest.mark.parametrize("client_certs", [
         None,
-        tutils.test_data.path("mitmproxy/data/clientcert"),
-        os.path.join(tutils.test_data.path("mitmproxy/data/clientcert"), "client.pem"),
+        "mitmproxy/data/clientcert",
+        "mitmproxy/data/clientcert/client.pem",
     ])
-    def test_tls(self, clientcert):
+    def test_tls(self, client_certs, tdata):
+        if client_certs:
+            client_certs = tdata.path(client_certs)
         c = connections.ServerConnection(("127.0.0.1", self.port))
         c.connect()
-        c.establish_ssl(clientcert, "foo.com")
+        c.establish_tls(client_certs=client_certs)
         assert c.connected()
-        assert c.sni == "foo.com"
         assert c.tls_established
         c.close()
         c.finish()

@@ -27,17 +27,39 @@ def colorful(line, styles):
 
 
 class Dumper:
-    def __init__(self, outfile=sys.stdout):
-        self.filter = None  # type: flowfilter.TFilter
-        self.outfp = outfile  # type: typing.io.TextIO
+    def __init__(self, outfile=sys.stdout, errfile=sys.stderr):
+        self.filter: flowfilter.TFilter = None
+        self.outfp: typing.io.TextIO = outfile
+        self.errfp: typing.io.TextIO = errfile
+
+    def load(self, loader):
+        loader.add_option(
+            "flow_detail", int, 1,
+            """
+            The display detail level for flows in mitmdump: 0 (almost quiet) to 3 (very verbose).
+              0: shortened request URL, response status code, WebSocket and TCP message notifications.
+              1: full request URL with response status code
+              2: 1 + HTTP headers
+              3: 2 + full response content, content of WebSocket and TCP messages.
+            """
+        )
+        loader.add_option(
+            "dumper_default_contentview", str, "auto",
+            "The default content view mode.",
+            choices = [i.name.lower() for i in contentviews.views]
+        )
+        loader.add_option(
+            "dumper_filter", typing.Optional[str], None,
+            "Limit which flows are dumped."
+        )
 
     def configure(self, updated):
-        if "view_filter" in updated:
-            if ctx.options.view_filter:
-                self.filter = flowfilter.parse(ctx.options.view_filter)
+        if "dumper_filter" in updated:
+            if ctx.options.dumper_filter:
+                self.filter = flowfilter.parse(ctx.options.dumper_filter)
                 if not self.filter:
                     raise exceptions.OptionsError(
-                        "Invalid filter expression: %s" % ctx.options.view_filter
+                        "Invalid filter expression: %s" % ctx.options.dumper_filter
                     )
             else:
                 self.filter = None
@@ -49,6 +71,11 @@ class Dumper:
         if self.outfp:
             self.outfp.flush()
 
+    def echo_error(self, text, **style):
+        click.secho(text, file=self.errfp, **style)
+        if self.errfp:
+            self.errfp.flush()
+
     def _echo_headers(self, headers):
         for k, v in headers.fields:
             k = strutils.bytes_to_escaped_str(k)
@@ -59,10 +86,11 @@ class Dumper:
             )
             self.echo(out, ident=4)
 
-    def _echo_message(self, message):
+    def _echo_message(self, message, flow):
         _, lines, error = contentviews.get_message_content_view(
-            ctx.options.default_contentview,
-            message
+            ctx.options.dumper_default_contentview,
+            message,
+            flow
         )
         if error:
             ctx.log.debug(error)
@@ -99,7 +127,7 @@ class Dumper:
                     human.format_address(flow.client_conn.address)
                 )
             )
-        elif flow.request.is_replay:
+        elif flow.is_replay == "request":
             client = click.style("[replay]", fg="yellow", bold=True)
         else:
             client = ""
@@ -138,7 +166,7 @@ class Dumper:
         self.echo(line)
 
     def _echo_response_line(self, flow):
-        if flow.response.is_replay:
+        if flow.is_replay == "response":
             replay = click.style("[replay] ", fg="yellow", bold=True)
         else:
             replay = ""
@@ -174,7 +202,7 @@ class Dumper:
             # This aligns the HTTP response code with the HTTP request method:
             # 127.0.0.1:59519: GET http://example.com/
             #               << 304 Not Modified 0b
-            arrows = " " * (len(repr(flow.client_conn.address)) - 2) + arrows
+            arrows = " " * (len(human.format_address(flow.client_conn.address)) - 2) + arrows
 
         line = "{replay}{arrows} {code} {reason} {size}".format(
             replay=replay,
@@ -191,14 +219,14 @@ class Dumper:
             if ctx.options.flow_detail >= 2:
                 self._echo_headers(f.request.headers)
             if ctx.options.flow_detail >= 3:
-                self._echo_message(f.request)
+                self._echo_message(f.request, f)
 
         if f.response:
             self._echo_response_line(f)
             if ctx.options.flow_detail >= 2:
                 self._echo_headers(f.response.headers)
             if ctx.options.flow_detail >= 3:
-                self._echo_message(f.response)
+                self._echo_message(f.response, f)
 
         if f.error:
             msg = strutils.escape_control_characters(f.error.msg)
@@ -222,9 +250,9 @@ class Dumper:
             self.echo_flow(f)
 
     def websocket_error(self, f):
-        self.echo(
+        self.echo_error(
             "Error in WebSocket connection to {}: {}".format(
-                repr(f.server_conn.address), f.error
+                human.format_address(f.server_conn.address), f.error
             ),
             fg="red"
         )
@@ -234,7 +262,9 @@ class Dumper:
             message = f.messages[-1]
             self.echo(f.message_info(message))
             if ctx.options.flow_detail >= 3:
-                self._echo_message(message)
+                message = message.from_state(message.get_state())
+                message.content = message.content.encode() if isinstance(message.content, str) else message.content
+                self._echo_message(message, f)
 
     def websocket_end(self, f):
         if self.match(f):
@@ -245,9 +275,9 @@ class Dumper:
                 f.close_reason))
 
     def tcp_error(self, f):
-        self.echo(
+        self.echo_error(
             "Error in TCP connection to {}: {}".format(
-                repr(f.server_conn.address), f.error
+                human.format_address(f.server_conn.address), f.error
             ),
             fg="red"
         )
@@ -257,9 +287,9 @@ class Dumper:
             message = f.messages[-1]
             direction = "->" if message.from_client else "<-"
             self.echo("{client} {direction} tcp {direction} {server}".format(
-                client=repr(f.client_conn.address),
-                server=repr(f.server_conn.address),
+                client=human.format_address(f.client_conn.address),
+                server=human.format_address(f.server_conn.address),
                 direction=direction,
             ))
             if ctx.options.flow_detail >= 3:
-                self._echo_message(message)
+                self._echo_message(message, f)

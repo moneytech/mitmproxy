@@ -7,6 +7,10 @@ from mitmproxy.net.http import cookies
 
 cookie_pairs = [
     [
+        "=uno",
+        [["", "uno"]]
+    ],
+    [
         "",
         []
     ],
@@ -16,14 +20,14 @@ cookie_pairs = [
     ],
     [
         "one",
-        [["one", None]]
+        [["one", ""]]
     ],
     [
         "one=uno; two=due",
         [["one", "uno"], ["two", "due"]]
     ],
     [
-        'one="uno"; two="\due"',
+        'one="uno"; two="\\due"',
         [["one", "uno"], ["two", "due"]]
     ],
     [
@@ -36,7 +40,7 @@ cookie_pairs = [
     ],
     [
         "one=uno; two; three=tre",
-        [["one", "uno"], ["two", None], ["three", "tre"]]
+        [["one", "uno"], ["two", ""], ["three", "tre"]]
     ],
     [
         "_lvs2=zHai1+Hq+Tc2vmc2r4GAbdOI5Jopg3EwsdUT9g=; "
@@ -66,7 +70,7 @@ def test_read_key():
 def test_read_quoted_string():
     tokens = [
         [('"foo" x', 0), ("foo", 5)],
-        [('"f\oo" x', 0), ("foo", 6)],
+        [('"f\\oo" x', 0), ("foo", 6)],
         [(r'"f\\o" x', 0), (r"f\o", 6)],
         [(r'"f\\" x', 0), (r"f" + '\\', 5)],
         [('"fo\\\"" x', 0), ("fo\"", 6)],
@@ -79,8 +83,12 @@ def test_read_quoted_string():
 def test_read_cookie_pairs():
     vals = [
         [
+            "=uno",
+            [["", "uno"]]
+        ],
+        [
             "one",
-            [["one", None]]
+            [["one", ""]]
         ],
         [
             "one=two",
@@ -100,7 +108,7 @@ def test_read_cookie_pairs():
         ],
         [
             'one="two"; three=four; five',
-            [["one", "two"], ["three", "four"], ["five", None]]
+            [["one", "two"], ["three", "four"], ["five", ""]]
         ],
         [
             'one="\\"two"; three=four',
@@ -135,6 +143,33 @@ def test_cookie_roundtrips():
 def test_parse_set_cookie_pairs():
     pairs = [
         [
+            "=",
+            [[
+                ["", ""]
+            ]]
+        ],
+        [
+            "=;foo=bar",
+            [[
+                ["", ""],
+                ["foo", "bar"]
+            ]]
+        ],
+        [
+            "=;=;foo=bar",
+            [[
+                ["", ""],
+                ["", ""],
+                ["foo", "bar"]
+            ]]
+        ],
+        [
+            "=uno",
+            [[
+                ["", "uno"]
+            ]]
+        ],
+        [
             "one=uno",
             [[
                 ["one", "uno"]
@@ -150,7 +185,7 @@ def test_parse_set_cookie_pairs():
             "one=uno; foo",
             [[
                 ["one", "uno"],
-                ["foo", None]
+                ["foo", ""]
             ]]
         ],
         [
@@ -198,6 +233,12 @@ def test_parse_set_cookie_header():
         ],
         [
             ";", []
+        ],
+        [
+            "=uno",
+            [
+                ("", "uno", ())
+            ]
         ],
         [
             "one=uno",
@@ -268,6 +309,9 @@ def test_refresh_cookie():
 
     c = "MOO=BAR; Expires=Tue, 08-Mar-2011 00:20:38 GMT; Path=foo.com; Secure"
     assert "00:21:38" in cookies.refresh_set_cookie_header(c, 60)
+
+    c = "rfoo=bar; Domain=reddit.com; expires=Thu, 31 Dec 2037; Path=/"
+    assert "expires" not in cookies.refresh_set_cookie_header(c, 60)
 
     c = "foo,bar"
     with pytest.raises(ValueError):

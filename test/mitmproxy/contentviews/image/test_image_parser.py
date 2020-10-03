@@ -1,7 +1,6 @@
 import pytest
 
 from mitmproxy.contentviews.image import image_parser
-from mitmproxy.test import tutils
 
 
 @pytest.mark.parametrize("filename, metadata", {
@@ -71,8 +70,8 @@ from mitmproxy.test import tutils
         ('date:modify', '2012-07-11T14:04:52-07:00')
     ],
 }.items())
-def test_parse_png(filename, metadata):
-    with open(tutils.test_data.path(filename), "rb") as f:
+def test_parse_png(filename, metadata, tdata):
+    with open(tdata.path(filename), "rb") as f:
         assert metadata == image_parser.parse_png(f.read())
 
 
@@ -101,8 +100,8 @@ def test_parse_png(filename, metadata):
         ('background', '0')
     ],
 }.items())
-def test_parse_gif(filename, metadata):
-    with open(tutils.test_data.path(filename), 'rb') as f:
+def test_parse_gif(filename, metadata, tdata):
+    with open(tdata.path(filename), 'rb') as f:
         assert metadata == image_parser.parse_gif(f.read())
 
 
@@ -164,6 +163,29 @@ def test_parse_gif(filename, metadata):
         ('Size', '750 x 1055 px')
     ],
 }.items())
-def test_parse_jpeg(filename, metadata):
-    with open(tutils.test_data.path(filename), 'rb') as f:
+def test_parse_jpeg(filename, metadata, tdata):
+    with open(tdata.path(filename), 'rb') as f:
         assert metadata == image_parser.parse_jpeg(f.read())
+
+
+@pytest.mark.parametrize("filename, metadata", {
+    "mitmproxy/data/image.ico": [
+        ('Format', 'ICO'),
+        ('Number of images', '3'),
+        ('Image 1', "Size: {} x {}\n"
+                    "{: >18}Bits per pixel: {}\n"
+                    "{: >18}PNG: {}".format(48, 48, '', 24, '', False)
+         ),
+        ('Image 2', "Size: {} x {}\n"
+                    "{: >18}Bits per pixel: {}\n"
+                    "{: >18}PNG: {}".format(32, 32, '', 24, '', False)
+         ),
+        ('Image 3', "Size: {} x {}\n"
+                    "{: >18}Bits per pixel: {}\n"
+                    "{: >18}PNG: {}".format(16, 16, '', 24, '', False)
+         )
+    ]
+}.items())
+def test_ico(filename, metadata, tdata):
+    with open(tdata.path(filename), 'rb') as f:
+        assert metadata == image_parser.parse_ico(f.read())

@@ -5,13 +5,19 @@ MANIFEST
 *.py[cdo]
 *.swp
 *.swo
+*.sqlite
 *.egg-info/
 .coverage*
 .idea
+.vscode
 .cache/
 .tox*/
 build/
+dist/
 mitmproxy/contrib/kaitaistruct/*.ksy
+.pytest_cache
+__pycache__
+.hypothesis/
 
 # UI
 
@@ -23,3 +29,4 @@ sslkeylogfile.log
 .python-version
 coverage.xml
 web/coverage/
+.mypy_cache/

@@ -1,7 +1,10 @@
+from typing import AnyStr
+
 import pytest
 import sys
 
 from mitmproxy.net.http import url
+from mitmproxy.net.http.url import parse_authority
 
 
 def test_parse():
@@ -49,6 +52,16 @@ def test_parse():
         url.parse('http://lo[calhost')
 
 
+def test_ascii_check():
+    test_url = "https://xyz.tax-edu.net?flag=selectCourse&lc_id=42825&lc_name=茅莽莽猫氓猫氓".encode()
+    scheme, host, port, full_path = url.parse(test_url)
+    assert scheme == b'https'
+    assert host == b'xyz.tax-edu.net'
+    assert port == 443
+    assert full_path == b'/?flag%3DselectCourse%26lc_id%3D42825%26lc_name%3D%E8%8C%85%E8%8E%BD%E8%8E' \
+                        b'%BD%E7%8C%AB%E6%B0%93%E7%8C%AB%E6%B0%93'
+
+
 @pytest.mark.skipif(sys.version_info < (3, 6), reason='requires Python 3.6 or higher')
 def test_parse_port_range():
     # Port out of range
@@ -61,19 +74,24 @@ def test_unparse():
     assert url.unparse("http", "foo.com", 80, "/bar") == "http://foo.com/bar"
     assert url.unparse("https", "foo.com", 80, "") == "https://foo.com:80"
     assert url.unparse("https", "foo.com", 443, "") == "https://foo.com"
+    assert url.unparse("https", "foo.com", 443, "*") == "https://foo.com"
 
 
-surrogates = bytes(range(256)).decode("utf8", "surrogateescape")
+# We ignore the byte 126: '~' because of an incompatibility in Python 3.6 and 3.7
+# In 3.6 it is escaped as %7E
+# In 3.7 it stays as ASCII character '~'
+# https://bugs.python.org/issue16285
+surrogates = (bytes(range(0, 126)) + bytes(range(127, 256))).decode("utf8", "surrogateescape")
 
 surrogates_quoted = (
     '%00%01%02%03%04%05%06%07%08%09%0A%0B%0C%0D%0E%0F'
     '%10%11%12%13%14%15%16%17%18%19%1A%1B%1C%1D%1E%1F'
     '%20%21%22%23%24%25%26%27%28%29%2A%2B%2C-./'
-    '0123456789%3A%3B%3C%3D%3E%3F'
-    '%40ABCDEFGHIJKLMNO'
-    'PQRSTUVWXYZ%5B%5C%5D%5E_'
-    '%60abcdefghijklmno'
-    'pqrstuvwxyz%7B%7C%7D%7E%7F'
+    '0123456789%3A%3B%3C%3D%3E%3F%40'
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+    '%5B%5C%5D%5E_%60'
+    'abcdefghijklmnopqrstuvwxyz'
+    '%7B%7C%7D%7F'  # 7E or ~ is excluded!
     '%80%81%82%83%84%85%86%87%88%89%8A%8B%8C%8D%8E%8F'
     '%90%91%92%93%94%95%96%97%98%99%9A%9B%9C%9D%9E%9F'
     '%A0%A1%A2%A3%A4%A5%A6%A7%A8%A9%AA%AB%AC%AD%AE%AF'
@@ -99,15 +117,16 @@ def test_empty_key_trailing_equal_sign():
     post_data_empty_key_middle = [('one', 'two'), ('emptykey', ''), ('three', 'four')]
     post_data_empty_key_end = [('one', 'two'), ('three', 'four'), ('emptykey', '')]
 
-    assert url.encode(post_data_empty_key_middle, similar_to = reference_with_equal) == "one=two&emptykey=&three=four"
-    assert url.encode(post_data_empty_key_end, similar_to = reference_with_equal) == "one=two&three=four&emptykey="
-    assert url.encode(post_data_empty_key_middle, similar_to = reference_without_equal) == "one=two&emptykey&three=four"
-    assert url.encode(post_data_empty_key_end, similar_to = reference_without_equal) == "one=two&three=four&emptykey"
+    assert url.encode(post_data_empty_key_middle, similar_to=reference_with_equal) == "one=two&emptykey=&three=four"
+    assert url.encode(post_data_empty_key_end, similar_to=reference_with_equal) == "one=two&three=four&emptykey="
+    assert url.encode(post_data_empty_key_middle, similar_to=reference_without_equal) == "one=two&emptykey&three=four"
+    assert url.encode(post_data_empty_key_end, similar_to=reference_without_equal) == "one=two&three=four&emptykey"
 
 
 def test_encode():
     assert url.encode([('foo', 'bar')])
     assert url.encode([('foo', surrogates)])
+    assert not url.encode([], similar_to="justatext")
 
 
 def test_decode():
@@ -126,3 +145,37 @@ def test_unquote():
     assert url.unquote("foo") == "foo"
     assert url.unquote("foo%20bar") == "foo bar"
     assert url.unquote(surrogates_quoted) == surrogates
+
+
+def test_hostport():
+    assert url.hostport(b"https", b"foo.com", 8080) == b"foo.com:8080"
+
+
+def test_default_port():
+    assert url.default_port("http") == 80
+    assert url.default_port(b"https") == 443
+    assert url.default_port(b"qux") is None
+
+
+@pytest.mark.parametrize(
+    "authority,valid,out", [
+        ["foo:42", True, ("foo", 42)],
+        [b"foo:42", True, ("foo", 42)],
+        ["127.0.0.1:443", True, ("127.0.0.1", 443)],
+        ["[2001:db8:42::]:443", True, ("2001:db8:42::", 443)],
+        [b"xn--aaa-pla.example:80", True, ("äaaa.example", 80)],
+        ["foo", True, ("foo", None)],
+        ["foo..bar", False, ("foo..bar", None)],
+        ["foo:bar", False, ("foo:bar", None)],
+        ["foo:999999999", False, ("foo:999999999", None)],
+        [b"\xff", False, ('\udcff', None)]
+    ]
+)
+def test_parse_authority(authority: AnyStr, valid: bool, out):
+    assert parse_authority(authority, False) == out
+
+    if valid:
+        assert parse_authority(authority, True) == out
+    else:
+        with pytest.raises(ValueError):
+            parse_authority(authority, True)

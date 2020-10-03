@@ -13,11 +13,11 @@ import logging
 
 from mitmproxy import certs
 from mitmproxy import exceptions
-from mitmproxy.net import tcp
+from mitmproxy.net import tcp, tls
 from mitmproxy.net import websockets
 from mitmproxy.net import socks
 from mitmproxy.net import http as net_http
-from mitmproxy.types import basethread
+from mitmproxy.coretypes import basethread
 from mitmproxy.utils import strutils
 
 from pathod import log
@@ -79,7 +79,7 @@ class SSLInfo:
             }
             t = types.get(pk.type(), "Uknown")
             parts.append("\tPubkey: %s bit %s" % (pk.bits(), t))
-            s = certs.SSLCert(i)
+            s = certs.Cert(i)
             if s.altnames:
                 parts.append("\tSANs: %s" % " ".join(strutils.always_str(n, "utf8") for n in s.altnames))
         return "\n".join(parts)
@@ -158,8 +158,8 @@ class Pathoc(tcp.TCPClient):
             # SSL
             ssl=None,
             sni=None,
-            ssl_version=tcp.SSL_DEFAULT_METHOD,
-            ssl_options=tcp.SSL_DEFAULT_OPTIONS,
+            ssl_version=tls.DEFAULT_METHOD,
+            ssl_options=tls.DEFAULT_OPTIONS,
             clientcert=None,
             ciphers=None,
 
@@ -223,14 +223,6 @@ class Pathoc(tcp.TCPClient):
         self.ws_framereader = None
 
         if self.use_http2:
-            if not tcp.HAS_ALPN:  # pragma: no cover
-                log.write_raw(
-                    self.fp,
-                    "HTTP/2 requires ALPN support. "
-                    "Please use OpenSSL >= 1.0.2. "
-                    "Pathoc might not be working as expected without ALPN.",
-                    timestamp=False
-                )
             self.protocol = http2.HTTP2StateProtocol(self, dump_frames=self.http2_framedump)
         else:
             self.protocol = net_http.http1
@@ -245,14 +237,18 @@ class Pathoc(tcp.TCPClient):
 
     def http_connect(self, connect_to):
         req = net_http.Request(
-            first_line_format='authority',
-            method='CONNECT',
-            scheme=None,
-            host=connect_to[0].encode("idna"),
+            host=connect_to[0],
             port=connect_to[1],
-            path=None,
-            http_version='HTTP/1.1',
+            method=b'CONNECT',
+            scheme=b"",
+            authority=f"{connect_to[0]}:{connect_to[1]}".encode(),
+            path=b"",
+            http_version=b'HTTP/1.1',
+            headers=((b"Host", connect_to[0].encode("idna")),),
             content=b'',
+            trailers=None,
+            timestamp_start=0,
+            timestamp_end=0,
         )
         self.wfile.write(net_http.http1.assemble_request(req))
         self.wfile.flush()
@@ -320,7 +316,7 @@ class Pathoc(tcp.TCPClient):
                     if self.use_http2:
                         alpn_protos.append(b'h2')
 
-                    self.convert_to_ssl(
+                    self.convert_to_tls(
                         sni=self.sni,
                         cert=self.clientcert,
                         method=self.ssl_version,
@@ -359,7 +355,7 @@ class Pathoc(tcp.TCPClient):
 
             timeout: If specified None may be yielded instead if timeout is
             reached. If timeout is None, wait forever. If timeout is 0, return
-            immedately if nothing is on the queue.
+            immediately if nothing is on the queue.
 
             finish: If true, consume messages until the reader shuts down.
             Otherwise, return None on timeout.
@@ -441,17 +437,21 @@ class Pathoc(tcp.TCPClient):
                 req = language.serve(r, self.wfile, self.settings)
                 self.wfile.flush()
 
-                # build a dummy request to read the reponse
+                # build a dummy request to read the response
                 # ideally this would be returned directly from language.serve
                 dummy_req = net_http.Request(
-                    first_line_format="relative",
+                    host="localhost",
+                    port=80,
                     method=req["method"],
                     scheme=b"http",
-                    host=b"localhost",
-                    port=80,
+                    authority=b"",
                     path=b"/",
                     http_version=b"HTTP/1.1",
+                    headers=(),
                     content=b'',
+                    trailers=None,
+                    timestamp_start=time.time(),
+                    timestamp_end=None,
                 )
 
                 resp = self.protocol.read_response(self.rfile, dummy_req)
@@ -478,7 +478,7 @@ class Pathoc(tcp.TCPClient):
         """
             Performs a single request.
 
-            r: A language.message.Messsage object, or a string representing
+            r: A language.message.Message object, or a string representing
             one.
 
             Returns Response if we have a non-ignored response.

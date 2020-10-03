@@ -14,10 +14,10 @@ class _LayerCodeCompletion:
         super().__init__(**mixin_args)
         if True:
             return
-        self.config = None  # type: config.ProxyConfig
-        self.client_conn = None  # type: connections.ClientConnection
-        self.server_conn = None  # type: connections.ServerConnection
-        self.channel = None  # type: controller.Channel
+        self.config: config.ProxyConfig = None
+        self.client_conn: connections.ClientConnection = None
+        self.server_conn: connections.ServerConnection = None
+        self.channel: controller.Channel = None
         self.ctx = None
         """@type: mitmproxy.proxy.protocol.Layer"""
 
@@ -96,15 +96,7 @@ class ServerConnectionMixin:
     def __init__(self, server_address=None):
         super().__init__()
 
-        self.server_conn = None
-        if self.config.options.spoof_source_address and self.config.options.upstream_bind_address == '':
-            self.server_conn = connections.ServerConnection(
-                server_address, (self.ctx.client_conn.address[0], 0), True)
-        else:
-            self.server_conn = connections.ServerConnection(
-                server_address, (self.config.options.upstream_bind_address, 0),
-                self.config.options.spoof_source_address
-            )
+        self.server_conn = self.__make_server_conn(server_address)
 
         self.__check_self_connect()
 
@@ -115,15 +107,30 @@ class ServerConnectionMixin:
         """
         address = self.server_conn.address
         if address:
+            forbidden_hosts = ["localhost", "127.0.0.1", "::1"]
+
+            if self.config.options.listen_host:
+                forbidden_hosts.append(self.config.options.listen_host)
+
             self_connect = (
                 address[1] == self.config.options.listen_port and
-                address[0] in ("localhost", "127.0.0.1", "::1")
+                address[0] in forbidden_hosts
             )
             if self_connect:
                 raise exceptions.ProtocolException(
                     "Invalid server address: {}\r\n"
                     "The proxy shall not connect to itself.".format(repr(address))
                 )
+
+    def __make_server_conn(self, server_address):
+        if self.config.options.spoof_source_address and self.config.options.upstream_bind_address == '':
+            return connections.ServerConnection(
+                server_address, (self.ctx.client_conn.address[0], 0), True)
+        else:
+            return connections.ServerConnection(
+                server_address, (self.config.options.upstream_bind_address, 0),
+                self.config.options.spoof_source_address
+            )
 
     def set_server(self, address):
         """
@@ -146,11 +153,7 @@ class ServerConnectionMixin:
         self.server_conn.close()
         self.channel.tell("serverdisconnect", self.server_conn)
 
-        self.server_conn = connections.ServerConnection(
-            address,
-            (self.server_conn.source_address[0], 0),
-            self.config.options.spoof_source_address
-        )
+        self.server_conn = self.__make_server_conn(address)
 
     def connect(self):
         """
@@ -162,10 +165,10 @@ class ServerConnectionMixin:
         """
         if not self.server_conn.address:
             raise exceptions.ProtocolException("Cannot connect to server, no server address given.")
-        self.log("serverconnect", "debug", [repr(self.server_conn.address)])
-        self.channel.ask("serverconnect", self.server_conn)
         try:
             self.server_conn.connect()
+            self.log("serverconnect", "debug", [repr(self.server_conn.address)])
+            self.channel.ask("serverconnect", self.server_conn)
         except exceptions.TcpException as e:
             raise exceptions.ProtocolException(
                 "Server connection to {} failed: {}".format(

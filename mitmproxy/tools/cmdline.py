@@ -1,24 +1,12 @@
 import argparse
-import os
-
-from mitmproxy import options
-from mitmproxy import version
-
-
-CONFIG_PATH = os.path.join(options.CA_DIR, "config.yaml")
 
 
 def common_options(parser, opts):
     parser.add_argument(
         '--version',
         action='store_true',
+        help="show version number and exit",
         dest='version',
-    )
-    parser.add_argument(
-        '--shortversion',
-        action='version',
-        help="show program's short version number and exit",
-        version=version.VERSION
     )
     parser.add_argument(
         '--options',
@@ -29,12 +17,6 @@ def common_options(parser, opts):
         '--commands',
         action='store_true',
         help="Show all commands and their signatures",
-    )
-    parser.add_argument(
-        "--conf",
-        type=str, dest="conf", default=CONFIG_PATH,
-        metavar="PATH",
-        help="Read options from a configuration file"
     )
     parser.add_argument(
         "--set",
@@ -54,7 +36,7 @@ def common_options(parser, opts):
     )
     parser.add_argument(
         "-v", "--verbose",
-        action="store_const", dest="verbose", const=3,
+        action="store_const", dest="verbose", const='debug',
         help="Increase log verbosity."
     )
 
@@ -75,15 +57,19 @@ def common_options(parser, opts):
     opts.make_parser(group, "listen_port", metavar="PORT", short="p")
     opts.make_parser(group, "server", short="n")
     opts.make_parser(group, "ignore_hosts", metavar="HOST")
+    opts.make_parser(group, "allow_hosts", metavar="HOST")
     opts.make_parser(group, "tcp_hosts", metavar="HOST")
     opts.make_parser(group, "upstream_auth", metavar="USER:PASS")
     opts.make_parser(group, "proxyauth", metavar="SPEC")
     opts.make_parser(group, "rawtcp")
+    opts.make_parser(group, "http2")
 
     # Proxy SSL options
     group = parser.add_argument_group("SSL")
     opts.make_parser(group, "certs", metavar="SPEC")
+    opts.make_parser(group, "cert_passphrase", metavar="PASS")
     opts.make_parser(group, "ssl_insecure", short="k")
+    opts.make_parser(group, "key_size", metavar="KEY_SIZE")
 
     # Client replay
     group = parser.add_argument_group("Client Replay")
@@ -92,23 +78,33 @@ def common_options(parser, opts):
     # Server replay
     group = parser.add_argument_group("Server Replay")
     opts.make_parser(group, "server_replay", metavar="PATH", short="S")
-    opts.make_parser(group, "replay_kill_extra")
+    opts.make_parser(group, "server_replay_kill_extra")
     opts.make_parser(group, "server_replay_nopop")
+    opts.make_parser(group, "server_replay_refresh")
 
-    # Replacements
-    group = parser.add_argument_group("Replacements")
-    opts.make_parser(group, "replacements", metavar="PATTERN", short="R")
+    # Map Remote
+    group = parser.add_argument_group("Map Remote")
+    opts.make_parser(group, "map_remote", metavar="PATTERN", short="M")
 
-    # Set headers
-    group = parser.add_argument_group("Set Headers")
-    opts.make_parser(group, "setheaders", metavar="PATTERN", short="H")
+    # Map Local
+    group = parser.add_argument_group("Map Local")
+    opts.make_parser(group, "map_local", metavar="PATTERN")
+
+    # Modify Body
+    group = parser.add_argument_group("Modify Body")
+    opts.make_parser(group, "modify_body", metavar="PATTERN", short="B")
+
+    # Modify headers
+    group = parser.add_argument_group("Modify Headers")
+    opts.make_parser(group, "modify_headers", metavar="PATTERN", short="H")
 
 
 def mitmproxy(opts):
     parser = argparse.ArgumentParser(usage="%(prog)s [options]")
     common_options(parser, opts)
 
-    opts.make_parser(parser, "console_eventlog")
+    opts.make_parser(parser, "console_layout")
+    opts.make_parser(parser, "console_layout_headers")
     group = parser.add_argument_group(
         "Filters",
         "See help in mitmproxy for filter expression syntax."
@@ -140,7 +136,7 @@ def mitmweb(opts):
     group = parser.add_argument_group("Mitmweb")
     opts.make_parser(group, "web_open_browser")
     opts.make_parser(group, "web_port", metavar="PORT")
-    opts.make_parser(group, "web_iface", metavar="INTERFACE")
+    opts.make_parser(group, "web_host", metavar="HOST")
 
     common_options(parser, opts)
     group = parser.add_argument_group(

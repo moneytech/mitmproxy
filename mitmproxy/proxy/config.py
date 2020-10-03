@@ -1,21 +1,18 @@
 import os
 import re
-from typing import Any
+import typing
 
-from OpenSSL import SSL, crypto
+from OpenSSL import crypto
 
+from mitmproxy import certs
 from mitmproxy import exceptions
 from mitmproxy import options as moptions
-from mitmproxy import certs
-from mitmproxy.net import tcp
 from mitmproxy.net import server_spec
-
-CONF_BASENAME = "mitmproxy"
 
 
 class HostMatcher:
-
-    def __init__(self, patterns=tuple()):
+    def __init__(self, handle, patterns=tuple()):
+        self.handle = handle
         self.patterns = list(patterns)
         self.regexes = [re.compile(p, re.IGNORECASE) for p in self.patterns]
 
@@ -23,10 +20,10 @@ class HostMatcher:
         if not address:
             return False
         host = "%s:%s" % address
-        if any(rex.search(host) for rex in self.regexes):
-            return True
-        else:
-            return False
+        if self.handle in ["ignore", "tcp"]:
+            return any(rex.search(host) for rex in self.regexes)
+        else:  # self.handle == "allow"
+            return not any(rex.search(host) for rex in self.regexes)
 
     def __bool__(self):
         return bool(self.patterns)
@@ -37,54 +34,41 @@ class ProxyConfig:
     def __init__(self, options: moptions.Options) -> None:
         self.options = options
 
-        self.check_ignore = None  # type: HostMatcher
-        self.check_tcp = None  # type: HostMatcher
-        self.certstore = None  # type: certs.CertStore
-        self.client_certs = None  # type: str
-        self.openssl_verification_mode_server = None  # type: int
+        self.certstore: certs.CertStore
+        self.check_filter: typing.Optional[HostMatcher] = None
+        self.check_tcp: typing.Optional[HostMatcher] = None
+        self.upstream_server: typing.Optional[server_spec.ServerSpec] = None
         self.configure(options, set(options.keys()))
         options.changed.connect(self.configure)
 
-    def configure(self, options: moptions.Options, updated: Any) -> None:
-        if options.add_upstream_certs_to_client_chain and not options.ssl_insecure:
-            raise exceptions.OptionsError(
-                "The verify-upstream-cert requires certificate verification to be disabled. "
-                "If upstream certificates are verified then extra upstream certificates are "
-                "not available for inclusion to the client chain."
-            )
+    def configure(self, options: moptions.Options, updated: typing.Any) -> None:
+        if options.allow_hosts and options.ignore_hosts:
+            raise exceptions.OptionsError("--ignore-hosts and --allow-hosts are mutually "
+                                          "exclusive; please choose one.")
 
-        if options.ssl_insecure:
-            self.openssl_verification_mode_server = SSL.VERIFY_NONE
+        if options.ignore_hosts:
+            self.check_filter = HostMatcher("ignore", options.ignore_hosts)
+        elif options.allow_hosts:
+            self.check_filter = HostMatcher("allow", options.allow_hosts)
         else:
-            self.openssl_verification_mode_server = SSL.VERIFY_PEER
+            self.check_filter = HostMatcher(False)
+        if "tcp_hosts" in updated:
+            self.check_tcp = HostMatcher("tcp", options.tcp_hosts)
 
-        self.check_ignore = HostMatcher(options.ignore_hosts)
-        self.check_tcp = HostMatcher(options.tcp_hosts)
-
-        self.openssl_method_client, self.openssl_options_client = \
-            tcp.sslversion_choices[options.ssl_version_client]
-        self.openssl_method_server, self.openssl_options_server = \
-            tcp.sslversion_choices[options.ssl_version_server]
-
-        certstore_path = os.path.expanduser(options.cadir)
+        certstore_path = os.path.expanduser(options.confdir)
         if not os.path.exists(os.path.dirname(certstore_path)):
             raise exceptions.OptionsError(
                 "Certificate Authority parent directory does not exist: %s" %
-                os.path.dirname(options.cadir)
+                os.path.dirname(certstore_path)
             )
+        key_size = options.key_size
+        passphrase = options.cert_passphrase.encode("utf-8") if options.cert_passphrase else None
         self.certstore = certs.CertStore.from_store(
             certstore_path,
-            CONF_BASENAME
+            moptions.CONF_BASENAME,
+            key_size,
+            passphrase
         )
-
-        if options.client_certs:
-            client_certs = os.path.expanduser(options.client_certs)
-            if not os.path.exists(client_certs):
-                raise exceptions.OptionsError(
-                    "Client certificate path does not exist: %s" %
-                    options.client_certs
-                )
-            self.client_certs = client_certs
 
         for c in options.certs:
             parts = c.split("=", 1)
@@ -97,7 +81,7 @@ class ProxyConfig:
                     "Certificate file does not exist: %s" % cert
                 )
             try:
-                self.certstore.add_cert_file(parts[0], cert)
+                self.certstore.add_cert_file(parts[0], cert, passphrase)
             except crypto.Error:
                 raise exceptions.OptionsError(
                     "Invalid certificate format: %s" % cert

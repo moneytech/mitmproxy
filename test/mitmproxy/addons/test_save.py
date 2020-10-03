@@ -5,14 +5,13 @@ from mitmproxy.test import tflow
 
 from mitmproxy import io
 from mitmproxy import exceptions
-from mitmproxy import options
 from mitmproxy.addons import save
 from mitmproxy.addons import view
 
 
 def test_configure(tmpdir):
     sa = save.Save()
-    with taddons.context(options=options.Options()) as tctx:
+    with taddons.context(sa) as tctx:
         with pytest.raises(exceptions.OptionsError):
             tctx.configure(sa, save_stream_file=str(tmpdir))
         with pytest.raises(Exception, match="Invalid filter"):
@@ -26,19 +25,33 @@ def test_configure(tmpdir):
 
 
 def rd(p):
-    x = io.FlowReader(open(p, "rb"))
-    return list(x.stream())
+    with open(p, "rb") as f:
+        x = io.FlowReader(f)
+        return list(x.stream())
 
 
 def test_tcp(tmpdir):
     sa = save.Save()
-    with taddons.context() as tctx:
+    with taddons.context(sa) as tctx:
         p = str(tmpdir.join("foo"))
         tctx.configure(sa, save_stream_file=p)
 
         tt = tflow.ttcpflow()
         sa.tcp_start(tt)
         sa.tcp_end(tt)
+        tctx.configure(sa, save_stream_file=None)
+        assert rd(p)
+
+
+def test_websocket(tmpdir):
+    sa = save.Save()
+    with taddons.context(sa) as tctx:
+        p = str(tmpdir.join("foo"))
+        tctx.configure(sa, save_stream_file=p)
+
+        f = tflow.twebsocketflow()
+        sa.websocket_start(f)
+        sa.websocket_end(f)
         tctx.configure(sa, save_stream_file=None)
         assert rd(p)
 
@@ -60,12 +73,12 @@ def test_save_command(tmpdir):
         v = view.View()
         tctx.master.addons.add(v)
         tctx.master.addons.add(sa)
-        tctx.master.commands.call_args("save.file", ["@shown", p])
+        tctx.master.commands.execute("save.file @shown %s" % p)
 
 
 def test_simple(tmpdir):
     sa = save.Save()
-    with taddons.context() as tctx:
+    with taddons.context(sa) as tctx:
         p = str(tmpdir.join("foo"))
 
         tctx.configure(sa, save_stream_file=p)

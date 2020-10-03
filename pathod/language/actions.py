@@ -2,13 +2,11 @@ import abc
 import copy
 import random
 from functools import total_ordering
-
 import pyparsing as pp
-
 from . import base
 
 
-@total_ordering
+@total_ordering  # type: ignore
 class _Action(base.Token):
 
     """
@@ -103,7 +101,7 @@ class DisconnectAt(_Action):
 
 
 class InjectAt(_Action):
-    unique_name = None
+    unique_name = None  # type: ignore
 
     def __init__(self, offset, value):
         _Action.__init__(self, offset)

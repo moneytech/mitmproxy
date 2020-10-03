@@ -1,7 +1,7 @@
 import sys
 import traceback
 
-from mitmproxy import exceptions
+from mitmproxy import exceptions, flow
 from mitmproxy import connections
 from mitmproxy import controller  # noqa
 from mitmproxy import http
@@ -35,6 +35,7 @@ class DummyServer:
 class ProxyServer(tcp.TCPServer):
     allow_reuse_address = True
     bound = True
+    channel: controller.Channel
 
     def __init__(self, config: config.ProxyConfig) -> None:
         """
@@ -48,10 +49,11 @@ class ProxyServer(tcp.TCPServer):
             if config.options.mode == "transparent":
                 platform.init_transparent_mode()
         except Exception as e:
+            if self.socket:
+                self.socket.close()
             raise exceptions.ServerException(
                 'Error starting proxy server: ' + repr(e)
             ) from e
-        self.channel = None  # type: controller.Channel
 
     def set_channel(self, channel):
         self.channel = channel
@@ -69,7 +71,7 @@ class ProxyServer(tcp.TCPServer):
 class ConnectionHandler:
 
     def __init__(self, client_conn, client_address, config, channel):
-        self.config = config  # type: config.ProxyConfig
+        self.config: config.ProxyConfig = config
         self.client_conn = connections.ClientConnection(
             client_conn,
             client_address,
@@ -112,13 +114,13 @@ class ConnectionHandler:
     def handle(self):
         self.log("clientconnect", "info")
 
-        root_layer = self._create_root_layer()
-
+        root_layer = None
         try:
+            root_layer = self._create_root_layer()
             root_layer = self.channel.ask("clientconnect", root_layer)
             root_layer()
         except exceptions.Kill:
-            self.log("Connection killed", "info")
+            self.log(flow.Error.KILLED_MESSAGE, "info")
         except exceptions.ProtocolException as e:
             if isinstance(e, exceptions.ClientHandshakeException):
                 self.log(
@@ -129,7 +131,7 @@ class ConnectionHandler:
                 self.log(repr(e), "debug")
             elif isinstance(e, exceptions.InvalidServerCertificate):
                 self.log(str(e), "warn")
-                self.log("Invalid certificate, closing connection. Pass --insecure to disable validation.", "warn")
+                self.log("Invalid certificate, closing connection. Pass --ssl-insecure to disable validation.", "warn")
             else:
                 self.log(str(e), "warn")
 
@@ -149,7 +151,8 @@ class ConnectionHandler:
             print("Please lodge a bug report at: https://github.com/mitmproxy/mitmproxy", file=sys.stderr)
 
         self.log("clientdisconnect", "info")
-        self.channel.tell("clientdisconnect", root_layer)
+        if root_layer is not None:
+            self.channel.tell("clientdisconnect", root_layer)
         self.client_conn.finish()
 
     def log(self, msg, level):

@@ -1,15 +1,11 @@
-import struct
 from typing import Optional  # noqa
 from typing import Union
 
-import construct
 from mitmproxy import exceptions
-from mitmproxy.contrib import tls_parser
+from mitmproxy.net import tls as net_tls
 from mitmproxy.proxy.protocol import base
-from mitmproxy.net import check
 
-
-# taken from https://testssl.sh/openssl-rfc.mappping.html
+# taken from https://testssl.sh/openssl-rfc.mapping.html
 CIPHER_ID_NAME_MAP = {
     0x00: 'NULL-MD5',
     0x01: 'NULL-MD5',
@@ -199,130 +195,19 @@ CIPHER_ID_NAME_MAP = {
     0x080080: 'RC4-64-MD5',
 }
 
-
 # We manually need to specify this, otherwise OpenSSL may select a non-HTTP2 cipher by default.
-# https://mozilla.github.io/server-side-tls/ssl-config-generator/?server=apache-2.2.15&openssl=1.0.2&hsts=yes&profile=old
+# https://ssl-config.mozilla.org/#config=old
 DEFAULT_CLIENT_CIPHERS = (
-    "ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:"
-    "ECDHE-ECDSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:DHE-DSS-AES128-GCM-SHA256:kEDH+AESGCM:"
-    "ECDHE-RSA-AES128-SHA256:ECDHE-ECDSA-AES128-SHA256:ECDHE-RSA-AES128-SHA:ECDHE-ECDSA-AES128-SHA:"
-    "ECDHE-RSA-AES256-SHA384:ECDHE-ECDSA-AES256-SHA384:ECDHE-RSA-AES256-SHA:ECDHE-ECDSA-AES256-SHA:"
-    "DHE-RSA-AES128-SHA256:DHE-RSA-AES128-SHA:DHE-DSS-AES128-SHA256:DHE-RSA-AES256-SHA256:DHE-DSS-AES256-SHA:"
-    "DHE-RSA-AES256-SHA:ECDHE-RSA-DES-CBC3-SHA:ECDHE-ECDSA-DES-CBC3-SHA:AES128-GCM-SHA256:AES256-GCM-SHA384:"
-    "AES128-SHA256:AES256-SHA256:AES128-SHA:AES256-SHA:AES:DES-CBC3-SHA:"
-    "HIGH:!aNULL:!eNULL:!EXPORT:!DES:!RC4:!MD5:!PSK:!aECDH:"
-    "!EDH-DSS-DES-CBC3-SHA:!EDH-RSA-DES-CBC3-SHA:!KRB5-DES-CBC3-SHA"
+    "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:"
+    "ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:"
+    "DHE-RSA-AES256-GCM-SHA384:DHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES128-SHA256:ECDHE-RSA-AES128-SHA256:"
+    "ECDHE-ECDSA-AES128-SHA:ECDHE-RSA-AES128-SHA:ECDHE-ECDSA-AES256-SHA384:ECDHE-RSA-AES256-SHA384:"
+    "ECDHE-ECDSA-AES256-SHA:ECDHE-RSA-AES256-SHA:DHE-RSA-AES128-SHA256:DHE-RSA-AES256-SHA256:AES128-GCM-SHA256:"
+    "AES256-GCM-SHA384:AES128-SHA256:AES256-SHA256:AES128-SHA:AES256-SHA:DES-CBC3-SHA"
 )
 
 
-def is_tls_record_magic(d):
-    """
-    Returns:
-        True, if the passed bytes start with the TLS record magic bytes.
-        False, otherwise.
-    """
-    d = d[:3]
-
-    # TLS ClientHello magic, works for SSLv3, TLSv1.0, TLSv1.1, TLSv1.2
-    # http://www.moserware.com/2009/06/first-few-milliseconds-of-https.html#client-hello
-    return (
-        len(d) == 3 and
-        d[0] == 0x16 and
-        d[1] == 0x03 and
-        0x0 <= d[2] <= 0x03
-    )
-
-
-def get_client_hello(client_conn):
-    """
-    Peek into the socket and read all records that contain the initial client hello message.
-
-    client_conn:
-        The :py:class:`client connection <mitmproxy.connections.ClientConnection>`.
-
-    Returns:
-        The raw handshake packet bytes, without TLS record header(s).
-    """
-    client_hello = b""
-    client_hello_size = 1
-    offset = 0
-    while len(client_hello) < client_hello_size:
-        record_header = client_conn.rfile.peek(offset + 5)[offset:]
-        if not is_tls_record_magic(record_header) or len(record_header) != 5:
-            raise exceptions.TlsProtocolException('Expected TLS record, got "%s" instead.' % record_header)
-        record_size = struct.unpack("!H", record_header[3:])[0] + 5
-        record_body = client_conn.rfile.peek(offset + record_size)[offset + 5:]
-        if len(record_body) != record_size - 5:
-            raise exceptions.TlsProtocolException("Unexpected EOF in TLS handshake: %s" % record_body)
-        client_hello += record_body
-        offset += record_size
-        client_hello_size = struct.unpack("!I", b'\x00' + client_hello[1:4])[0] + 4
-    return client_hello
-
-
-class TlsClientHello:
-
-    def __init__(self, raw_client_hello):
-        self._client_hello = tls_parser.ClientHello.parse(raw_client_hello)
-
-    def raw(self):
-        return self._client_hello
-
-    @property
-    def cipher_suites(self):
-        return self._client_hello.cipher_suites.cipher_suites
-
-    @property
-    def sni(self):
-        if self._client_hello.extensions:
-            for extension in self._client_hello.extensions.extensions:
-                is_valid_sni_extension = (
-                    extension.type == 0x00 and
-                    len(extension.server_names) == 1 and
-                    extension.server_names[0].name_type == 0 and
-                    check.is_valid_host(extension.server_names[0].host_name)
-                )
-                if is_valid_sni_extension:
-                    return extension.server_names[0].host_name.decode("idna")
-        return None
-
-    @property
-    def alpn_protocols(self):
-        if self._client_hello.extensions:
-            for extension in self._client_hello.extensions.extensions:
-                if extension.type == 0x10:
-                    return list(extension.alpn_protocols)
-        return []
-
-    @classmethod
-    def from_client_conn(cls, client_conn):
-        """
-        Peek into the connection, read the initial client hello and parse it to obtain ALPN values.
-        client_conn:
-            The :py:class:`client connection <mitmproxy.connections.ClientConnection>`.
-        Returns:
-            :py:class:`client hello <mitmproxy.proxy.protocol.tls.TlsClientHello>`.
-        """
-        try:
-            raw_client_hello = get_client_hello(client_conn)[4:]  # exclude handshake header.
-        except exceptions.ProtocolException as e:
-            raise exceptions.TlsProtocolException('Cannot read raw Client Hello: %s' % repr(e))
-
-        try:
-            return cls(raw_client_hello)
-        except construct.ConstructError as e:
-            raise exceptions.TlsProtocolException(
-                'Cannot parse Client Hello: %s, Raw Client Hello: %s' %
-                (repr(e), raw_client_hello.encode("hex"))
-            )
-
-    def __repr__(self):
-        return "TlsClientHello( sni: %s alpn_protocols: %s,  cipher_suites: %s)" % \
-            (self.sni, self.alpn_protocols, self.cipher_suites)
-
-
 class TlsLayer(base.Layer):
-
     """
     The TLS layer implements transparent TLS connections.
 
@@ -333,13 +218,13 @@ class TlsLayer(base.Layer):
           the server connection.
     """
 
-    def __init__(self, ctx, client_tls, server_tls, custom_server_sni = None):
+    def __init__(self, ctx, client_tls, server_tls, custom_server_sni=None):
         super().__init__(ctx)
         self._client_tls = client_tls
         self._server_tls = server_tls
 
         self._custom_server_sni = custom_server_sni
-        self._client_hello = None  # type: Optional[TlsClientHello]
+        self._client_hello: Optional[net_tls.ClientHello] = None
 
     def __call__(self):
         """
@@ -354,9 +239,11 @@ class TlsLayer(base.Layer):
         if self._client_tls:
             # Peek into the connection, read the initial client hello and parse it to obtain SNI and ALPN values.
             try:
-                self._client_hello = TlsClientHello.from_client_conn(self.client_conn)
+                self._client_hello = net_tls.ClientHello.from_file(self.client_conn.rfile)
             except exceptions.TlsProtocolException as e:
                 self.log("Cannot parse Client Hello: %s" % repr(e), "error")
+                # Without knowning the ClientHello we cannot proceed in this connection.
+                return
 
         # Do we need to do a server handshake now?
         # There are two reasons why we would want to establish TLS with the server now:
@@ -413,7 +300,7 @@ class TlsLayer(base.Layer):
         if self._server_tls and not self.server_conn.tls_established:
             self._establish_tls_with_server()
 
-    def set_server_tls(self, server_tls: bool, sni: Union[str, None, bool]=None) -> None:
+    def set_server_tls(self, server_tls: bool, sni: Union[str, None, bool] = None) -> None:
         """
         Set the TLS settings for the next server connection that will be established.
         This function will not alter an existing connection.
@@ -435,14 +322,18 @@ class TlsLayer(base.Layer):
         return self._server_tls
 
     @property
-    def server_sni(self):
+    def server_sni(self) -> Optional[str]:
         """
         The Server Name Indication we want to send with the next server TLS handshake.
         """
         if self._custom_server_sni is False:
             return None
+        elif self._custom_server_sni:
+            return self._custom_server_sni
+        elif self._client_hello and self._client_hello.sni:
+            return self._client_hello.sni.decode("idna")
         else:
-            return self._custom_server_sni or self._client_hello and self._client_hello.sni
+            return None
 
     @property
     def alpn_for_client_connection(self):
@@ -486,10 +377,11 @@ class TlsLayer(base.Layer):
             extra_certs = None
 
         try:
-            self.client_conn.convert_to_ssl(
+            tls_method, tls_options = net_tls.VERSION_CHOICES[self.config.options.ssl_version_client]
+            self.client_conn.convert_to_tls(
                 cert, key,
-                method=self.config.openssl_method_client,
-                options=self.config.openssl_options_client,
+                method=tls_method,
+                options=tls_options,
                 cipher_list=self.config.options.ciphers_client or DEFAULT_CLIENT_CIPHERS,
                 dhparams=self.config.certstore.dhparams,
                 chain_file=chain_file,
@@ -502,11 +394,12 @@ class TlsLayer(base.Layer):
             # raises ann error.
             self.client_conn.rfile.peek(1)
         except exceptions.TlsException as e:
+            sni_str = self._client_hello.sni and self._client_hello.sni.decode("idna")
             raise exceptions.ClientHandshakeException(
                 "Cannot establish TLS with client (sni: {sni}): {e}".format(
-                    sni=self._client_hello.sni, e=repr(e)
+                    sni=sni_str, e=repr(e)
                 ),
-                self._client_hello.sni or repr(self.server_conn.address)
+                sni_str or repr(self.server_conn.address)
             )
 
     def _establish_tls_with_server(self):
@@ -518,11 +411,14 @@ class TlsLayer(base.Layer):
                     # We only support http/1.1 and h2.
                     # If the server only supports spdy (next to http/1.1), it may select that
                     # and mitmproxy would enter TCP passthrough mode, which we want to avoid.
-                    alpn = [x for x in self._client_hello.alpn_protocols if not (x.startswith(b"h2-") or x.startswith(b"spdy"))]
+                    alpn = [
+                        x for x in self._client_hello.alpn_protocols if
+                        not (x.startswith(b"h2-") or x.startswith(b"spdy"))
+                    ]
                 if alpn and b"h2" in alpn and not self.config.options.http2:
                     alpn.remove(b"h2")
 
-            if self.client_conn.ssl_established and self.client_conn.get_alpn_proto_negotiated():
+            if self.client_conn.tls_established and self.client_conn.get_alpn_proto_negotiated():
                 # If the client has already negotiated an ALP, then force the
                 # server to use the same. This can only happen if the host gets
                 # changed after the initial connection was established. E.g.:
@@ -533,6 +429,9 @@ class TlsLayer(base.Layer):
                 #   * which results in garbage because the layers don' match.
                 alpn = [self.client_conn.get_alpn_proto_negotiated()]
 
+            # We pass through the list of ciphers send by the client, because some HTTP/2 servers
+            # will select a non-HTTP/2 compatible cipher from our default list and then hang up
+            # because it's incompatible with h2. :-)
             ciphers_server = self.config.options.ciphers_server
             if not ciphers_server and self._client_tls:
                 ciphers_server = []
@@ -541,16 +440,12 @@ class TlsLayer(base.Layer):
                         ciphers_server.append(CIPHER_ID_NAME_MAP[id])
                 ciphers_server = ':'.join(ciphers_server)
 
-            self.server_conn.establish_ssl(
-                self.config.client_certs,
-                self.server_sni,
-                method=self.config.openssl_method_server,
-                options=self.config.openssl_options_server,
-                verify_options=self.config.openssl_verification_mode_server,
-                ca_path=self.config.options.ssl_verify_upstream_trusted_cadir,
-                ca_pemfile=self.config.options.ssl_verify_upstream_trusted_ca,
-                cipher_list=ciphers_server,
+            args = net_tls.client_arguments_from_options(self.config.options)
+            args["cipher_list"] = ciphers_server
+            self.server_conn.establish_tls(
+                sni=self.server_sni,
                 alpn_protos=alpn,
+                **args
             )
             tls_cert_err = self.server_conn.ssl_verification_error
             if tls_cert_err is not None:
@@ -573,11 +468,12 @@ class TlsLayer(base.Layer):
 
     def _find_cert(self):
         """
-        This function determines the Common Name (CN) and Subject Alternative Names (SANs)
+        This function determines the Common Name (CN), Subject Alternative Names (SANs) and Organization Name
         our certificate should have and then fetches a matching cert from the certstore.
         """
         host = None
         sans = set()
+        organization = None
 
         # In normal operation, the server address should always be known at this point.
         # However, we may just want to establish TLS so that we can send an error message to the client,
@@ -597,9 +493,11 @@ class TlsLayer(base.Layer):
             if upstream_cert.cn:
                 sans.add(host)
                 host = upstream_cert.cn.decode("utf8").encode("idna")
+            if upstream_cert.organization:
+                organization = upstream_cert.organization
         # Also add SNI values.
         if self._client_hello.sni:
-            sans.add(self._client_hello.sni.encode("idna"))
+            sans.add(self._client_hello.sni)
         if self._custom_server_sni:
             sans.add(self._custom_server_sni.encode("idna"))
 
@@ -607,4 +505,4 @@ class TlsLayer(base.Layer):
         # In other words, the Common Name is irrelevant then.
         if host:
             sans.add(host)
-        return self.config.certstore.get_cert(host, list(sans))
+        return self.config.certstore.get_cert(host, list(sans), organization)

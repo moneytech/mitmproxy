@@ -1,11 +1,10 @@
-jest.unmock('../../ducks/flows');
 jest.mock('../../utils')
 
 import reduceFlows from "../../ducks/flows"
 import * as flowActions from "../../ducks/flows"
 import reduceStore from "../../ducks/utils/store"
-import {fetchApi} from "../../utils"
-import {createStore} from "./tutils"
+import { fetchApi } from "../../utils"
+import { createStore } from "./tutils"
 
 describe('flow reducer', () => {
     let state = undefined
@@ -104,7 +103,7 @@ describe('flow reducer', () => {
 
 describe('flows actions', () => {
 
-    let store = createStore({reduceFlows})
+    let store = createStore({ reduceFlows })
 
     let tflow = { id: 1 }
     it('should handle resume action', () => {
@@ -158,7 +157,9 @@ describe('flows actions', () => {
         file     = new window.Blob(['foo'], { type: 'plain/text' })
         body.append('file', file)
         store.dispatch(flowActions.uploadContent(tflow, 'foo', 'foo'))
-        expect(fetchApi).toBeCalledWith('/flows/1/foo/content', { method: 'POST', body})
+        // window.Blob's lastModified is always the current time,
+        // which causes flaky tests on comparison.
+        expect(fetchApi).toBeCalledWith('/flows/1/foo/content.data', { method: 'POST', body: expect.anything()})
     })
 
     it('should handle clear action', () => {

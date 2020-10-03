@@ -21,7 +21,7 @@ describe('formatTimeDelta', () => {
 
 describe('formatTimeSTamp', () => {
     it('should return formatted time', () => {
-        expect(utils.formatTimeStamp(1483228800)).toEqual("2017-01-01 00:00:00.000")
+        expect(utils.formatTimeStamp(1483228800, false)).toEqual("2017-01-01 00:00:00.000")
     })
 })
 
@@ -81,11 +81,6 @@ describe('pure', () => {
 
     it('should display function name', () => {
         expect(utils.pure(tFunc).displayName).toEqual('tFunc')
-    })
-
-    it('should suggest when should component update', () => {
-        expect(f.shouldComponentUpdate('foo')).toBeTruthy()
-        expect(f.shouldComponentUpdate('bar')).toBeFalsy()
     })
 
     it('should render properties', () => {

@@ -1,21 +1,19 @@
 import argparse
+import platform
 from unittest import mock
-from OpenSSL import SSL
+
 import pytest
 
-from mitmproxy.tools import cmdline
-from mitmproxy.tools import main
 from mitmproxy import options
 from mitmproxy.proxy import ProxyConfig
-from mitmproxy.proxy.server import DummyServer, ProxyServer, ConnectionHandler
 from mitmproxy.proxy import config
-from mitmproxy.test import tutils
-
+from mitmproxy.proxy.server import ConnectionHandler, DummyServer, ProxyServer
+from mitmproxy.tools import cmdline
+from mitmproxy.tools import main
 from ..conftest import skip_windows
 
 
 class MockParser(argparse.ArgumentParser):
-
     """
     argparse.ArgumentParser sys.exits() by default.
     Make it more testable by throwing an exception instead.
@@ -32,8 +30,7 @@ class TestProcessProxyOptions:
         opts = options.Options()
         cmdline.common_options(parser, opts)
         args = parser.parse_args(args=args)
-        main.process_options(parser, opts, args)
-        pconf = config.ProxyConfig(opts)
+        pconf = main.process_options(parser, opts, args)
         return parser, pconf
 
     def assert_noerr(self, *args):
@@ -44,23 +41,19 @@ class TestProcessProxyOptions:
     def test_simple(self):
         assert self.p()
 
-    def test_certs(self):
-        self.assert_noerr(
-            "--cert",
-            tutils.test_data.path("mitmproxy/data/testkey.pem"))
-        with pytest.raises(Exception, match="does not exist"):
-            self.p("--cert", "nonexistent")
-
-    def test_insecure(self):
-        p = self.assert_noerr("--ssl-insecure")
-        assert p.openssl_verification_mode_server == SSL.VERIFY_NONE
+    def test_certs(self, tdata):
+        with pytest.raises(Exception, match="ambiguous option"):
+            self.assert_noerr(
+                "--cert",
+                tdata.path("mitmproxy/data/testkey.pem"))
 
 
 class TestProxyServer:
 
     @skip_windows
+    @pytest.mark.skipif(platform.system() != "Linux", reason="Linux-only")
     def test_err(self):
-        # binding to 0.0.0.0:1 works without special permissions on Windows
+        # binding to 0.0.0.0:1 works without special permissions on Windows and macOS Mojave+
         conf = ProxyConfig(options.Options(listen_port=1))
         with pytest.raises(Exception, match="Error starting proxy server"):
             ProxyServer(conf)

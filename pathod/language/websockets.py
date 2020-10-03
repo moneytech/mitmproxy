@@ -1,8 +1,11 @@
 import random
 import string
+import typing  # noqa
+
+import pyparsing as pp
+
 import mitmproxy.net.websockets
 from mitmproxy.utils import strutils
-import pyparsing as pp
 from . import base, generators, actions, message
 
 NESTED_LEADER = b"pathod!"
@@ -13,7 +16,7 @@ class WF(base.CaselessLiteral):
 
 
 class OpCode(base.IntField):
-    names = {
+    names: typing.Dict[str, int] = {
         "continue": mitmproxy.net.websockets.OPCODE.CONTINUE,
         "text": mitmproxy.net.websockets.OPCODE.TEXT,
         "binary": mitmproxy.net.websockets.OPCODE.BINARY,
@@ -73,7 +76,7 @@ class Times(base.Integer):
     preamble = "x"
 
 
-COMPONENTS = (
+COMPONENTS = [
     OpCode,
     Length,
     # Bit flags
@@ -88,14 +91,13 @@ COMPONENTS = (
     KeyNone,
     Key,
     Times,
-
     Body,
     RawBody,
-)
+]
 
 
 class WebsocketFrame(message.Message):
-    components = COMPONENTS
+    components: typing.List[typing.Type[base._Component]] = COMPONENTS
     logattrs = ["body"]
     # Used for nested frames
     unique_name = "body"
@@ -234,12 +236,10 @@ class WebsocketFrame(message.Message):
         return ":".join([i.spec() for i in self.tokens])
 
 
-class NestedFrame(base.NestedMessage):
+class NestedFrame(message.NestedMessage):
     preamble = "f"
     nest_type = WebsocketFrame
 
 
 class WebsocketClientFrame(WebsocketFrame):
-    components = COMPONENTS + (
-        NestedFrame,
-    )
+    components = COMPONENTS + [NestedFrame]

@@ -1,29 +1,54 @@
 # Release Checklist
 
-Make sure run all these steps on the correct branch you want to create a new release for!
-- Verify `mitmproxy/version.py`
-- Update CHANGELOG
-- Verify that all CI tests pass
-- Tag the release and push to Github
-- Wait for tag CI to complete
+These steps assume you are on the correct branch and have a git remote called `origin` that points to the `mitmproxy/mitmproxy` repo. If necessary, create a major version branch starting off the release tag (e.g. `git checkout -b v4.x v4.0.0`) first.
 
-## GitHub Release
-- Create release notice on Github [here](https://github.com/mitmproxy/mitmproxy/releases/new)
-- Attach all files from the new release folder on https://snapshots.mitmproxy.org
+- Update CHANGELOG.
+- Verify that the compiled mitmweb assets are up-to-date.
+- Verify that all CI tests pass.
+- Verify that `mitmproxy/version.py` is correct. Remove `.dev` suffix if it exists.
+- Tag the release and push to Github.
+    - `git tag v4.0.0`
+    - `git push origin v4.0.0`
+- Wait for tag CI to complete.
 
-## PyPi
-- Upload wheel to pypi: `twine upload <mitmproxy-...-.whl`
+### GitHub Releases
+- Create release notice on Github
+  [here](https://github.com/mitmproxy/mitmproxy/releases/new) if not already
+  auto-created by the tag.
+- We DO NOT upload release artifacts to GitHub anymore. Simply add the
+  following snippet to the notice:
+  `You can find the latest release packages at https://mitmproxy.org/downloads/.`
 
-## Docker
-- Update docker-releases repo
-  - Create a new branch based of master for major versions.
-  - Update the dependencies in [alpine/requirements.txt](https://github.com/mitmproxy/docker-releases/commit/3d6a9989fde068ad0aea257823ac3d7986ff1613#diff-9b7e0eea8ae74688b1ac13ea080549ba)
-    * Creating a fresh venv, pip-installing the new wheel in there, and then export all packages:
-    * `virtualenv -ppython3.5 venv && source venv/bin/activate && pip install mitmproxy && pip freeze`
-  - Tag the commit with the correct version
-    * `2.0.0` for new major versions
-    * `2.0.2` for new patch versions
-    * `2.0` always points to the latest patch version of the `2.0.x` series (update tag + force push)
-- Update `latest` tag [here](https://hub.docker.com/r/mitmproxy/mitmproxy/~/settings/automated-builds/)
+### PyPi
+- The created wheel is uploaded to PyPi automatically.
+- Please verify that https://pypi.python.org/pypi/mitmproxy has the latest version.
 
-After everything is done, you might want to bump the version on master in [https://github.com/mitmproxy/mitmproxy/blob/master/mitmproxy/version.py](mitmproxy/version.py) if you just created a major release.
+### Homebrew
+- The Homebrew maintainers are typically very fast and detect our new relese
+  within a day.
+- If you feel the need, you can run this from a macOS machine:
+  `brew bump-formula-pr --url https://github.com/mitmproxy/mitmproxy/archive/v<version number here>.tar.gz mitmproxy`
+
+### Docker
+- The docker image is built by our CI workers and pushed to Docker Hub automatically.
+- Please verify that https://hub.docker.com/r/mitmproxy/mitmproxy/tags/ has the latest version.
+- Please verify that the latest tag points to the most recent image (same digest / hash).
+
+### Docs
+  - `./build.sh`. If everything looks alright, continue with
+  - `./upload-stable.sh`,
+  - `DOCS_ARCHIVE=true ./build.sh`, and
+  - `./upload-archive.sh v4`. Doing this now already saves you from switching back to an old state on the next release.
+
+### Website
+ - Update version here:
+   https://github.com/mitmproxy/www/blob/master/src/config.toml
+ - Update docs menu here:
+   https://github.com/mitmproxy/www/blob/master/src/themes/mitmproxy/layouts/partials/header.html
+ - Run `./build && ./upload-test`.
+ - If everything looks alright at https://www-test.mitmproxy.org, run `./upload-prod`.
+
+
+### Prepare for next release
+ - Last but not least, bump the major version on master in
+   [https://github.com/mitmproxy/mitmproxy/blob/master/mitmproxy/version.py](mitmproxy/version.py) and add a `.dev` suffix.

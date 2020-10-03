@@ -112,6 +112,10 @@ class AddonHalt(MitmproxyException):
     pass
 
 
+class TypeError(MitmproxyException):
+    pass
+
+
 """
     Net-layer exceptions
 """
@@ -123,6 +127,10 @@ class NetlibException(MitmproxyException):
     """
     def __init__(self, message=None):
         super().__init__(message)
+
+
+class SessionLoadException(MitmproxyException):
+    pass
 
 
 class Disconnect:

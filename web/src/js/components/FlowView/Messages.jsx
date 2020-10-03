@@ -9,6 +9,7 @@ import ContentView from '../ContentView'
 import ContentViewOptions from '../ContentView/ContentViewOptions'
 import ValidateEditor from '../ValueEditor/ValidateEditor'
 import ValueEditor from '../ValueEditor/ValueEditor'
+import HideInStatic from '../common/HideInStatic'
 
 import Headers from './Headers'
 import { startEdit, updateEdit } from '../../ducks/ui/flow'
@@ -104,7 +105,16 @@ export class Request extends Component {
                         flow={flow}
                         onContentChange={content => updateFlow({ request: {content}})}
                         message={flow.request}/>
+                    
+                    <hr/>
+                    <Headers
+                        message={flow.request}
+                        readonly={!isEdit}
+                        onChange={trailers => updateFlow({ request: { trailers } })}
+                        type='trailers'
+                    />
                 </article>
+                <HideInStatic>
                 {!noContent &&
                     <footer>
                         <ContentViewOptions
@@ -114,33 +124,10 @@ export class Request extends Component {
                             uploadContent={content => uploadContent(flow, content, "request")}/>
                     </footer>
                 }
+                </HideInStatic>
             </section>
         )
     }
-
-
-    edit(k) {
-        throw "unimplemented"
-        /*
-         switch (k) {
-         case 'm':
-         this.refs.requestLine.refs.method.focus()
-         break
-         case 'u':
-         this.refs.requestLine.refs.url.focus()
-         break
-         case 'v':
-         this.refs.requestLine.refs.httpVersion.focus()
-         break
-         case 'h':
-         this.refs.headers.edit()
-         break
-         default:
-         throw new Error(`Unimplemented: ${k}`)
-         }
-         */
-    }
-
 }
 
 Request = Message(Request)
@@ -171,7 +158,15 @@ export class Response extends Component {
                         onContentChange={content => updateFlow({ response: {content}})}
                         message={flow.response}
                     />
+                    <hr/>
+                    <Headers
+                        message={flow.response}
+                        readonly={!isEdit}
+                        onChange={trailers => updateFlow({ response: { trailers } })}
+                        type='trailers'
+                    />
                 </article>
+                <HideInStatic>
                 {!noContent &&
                     <footer >
                         <ContentViewOptions
@@ -181,30 +176,9 @@ export class Response extends Component {
                             readonly={!isEdit}/>
                     </footer>
                 }
+                </HideInStatic>
             </section>
         )
-    }
-
-    edit(k) {
-        throw "unimplemented"
-        /*
-         switch (k) {
-         case 'c':
-         this.refs.responseLine.refs.status_code.focus()
-         break
-         case 'm':
-         this.refs.responseLine.refs.msg.focus()
-         break
-         case 'v':
-         this.refs.responseLine.refs.httpVersion.focus()
-         break
-         case 'h':
-         this.refs.headers.edit()
-         break
-         default:
-         throw new Error(`'Unimplemented: ${k}`)
-         }
-         */
     }
 }
 

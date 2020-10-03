@@ -57,7 +57,7 @@ export function PathColumn({ flow }) {
 
     let err;
     if(flow.error){
-        if (flow.error.msg === "Connection killed"){
+        if (flow.error.msg === "Connection killed."){
             err = <i className="fa fa-fw fa-times pull-right"></i>
         } else {
             err = <i className="fa fa-fw fa-exclamation pull-right"></i>
@@ -90,8 +90,26 @@ MethodColumn.headerClass = 'col-method'
 MethodColumn.headerName = 'Method'
 
 export function StatusColumn({ flow }) {
+    let color = 'darkred';
+
+    if (flow.response && 100 <= flow.response.status_code && flow.response.status_code < 200) {
+        color = 'green'
+    }
+    else if (flow.response && 200 <= flow.response.status_code && flow.response.status_code < 300) {
+        color = 'darkgreen'
+    }
+    else if (flow.response && 300 <= flow.response.status_code && flow.response.status_code < 400) {
+        color = 'lightblue'
+    }
+    else if (flow.response && 400 <= flow.response.status_code && flow.response.status_code < 500) {
+        color = 'lightred'
+    }
+    else if (flow.response && 500 <= flow.response.status_code && flow.response.status_code < 600) {
+        color = 'lightred'
+    }
+
     return (
-        <td className="col-status">{flow.response && flow.response.status_code}</td>
+        <td className="col-status" style={{color: color}}>{flow.response && flow.response.status_code}</td>
     )
 }
 
@@ -119,7 +137,7 @@ export function TimeColumn({ flow }) {
     return (
         <td className="col-time">
             {flow.response ? (
-                formatTimeDelta(1000 * (flow.response.timestamp_end - flow.server_conn.timestamp_start))
+                formatTimeDelta(1000 * (flow.response.timestamp_end - flow.request.timestamp_start))
             ) : (
                 '...'
             )}

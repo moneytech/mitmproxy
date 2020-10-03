@@ -1,24 +1,47 @@
-import re
 import codecs
-from typing import AnyStr, Optional, cast
+import io
+import re
+from typing import Iterable, Union, overload
 
 
-def always_bytes(str_or_bytes: Optional[AnyStr], *encode_args) -> Optional[bytes]:
-    if isinstance(str_or_bytes, bytes) or str_or_bytes is None:
-        return cast(Optional[bytes], str_or_bytes)
+# https://mypy.readthedocs.io/en/stable/more_types.html#function-overloading
+
+@overload
+def always_bytes(str_or_bytes: None, *encode_args) -> None:
+    ...
+
+
+@overload
+def always_bytes(str_or_bytes: Union[str, bytes], *encode_args) -> bytes:
+    ...
+
+
+def always_bytes(str_or_bytes: Union[None, str, bytes], *encode_args) -> Union[None, bytes]:
+    if str_or_bytes is None or isinstance(str_or_bytes, bytes):
+        return str_or_bytes
     elif isinstance(str_or_bytes, str):
         return str_or_bytes.encode(*encode_args)
     else:
         raise TypeError("Expected str or bytes, but got {}.".format(type(str_or_bytes).__name__))
 
 
-def always_str(str_or_bytes: Optional[AnyStr], *decode_args) -> Optional[str]:
+@overload
+def always_str(str_or_bytes: None, *encode_args) -> None:
+    ...
+
+
+@overload
+def always_str(str_or_bytes: Union[str, bytes], *encode_args) -> str:
+    ...
+
+
+def always_str(str_or_bytes: Union[None, str, bytes], *decode_args) -> Union[None, str]:
     """
     Returns,
         str_or_bytes unmodified, if
     """
-    if isinstance(str_or_bytes, str) or str_or_bytes is None:
-        return cast(Optional[str], str_or_bytes)
+    if str_or_bytes is None or isinstance(str_or_bytes, str):
+        return str_or_bytes
     elif isinstance(str_or_bytes, bytes):
         return str_or_bytes.decode(*decode_args)
     else:
@@ -37,7 +60,6 @@ _control_char_trans[127] = ord(".")  # 0x2421
 _control_char_trans_newline = _control_char_trans.copy()
 for x in ("\r", "\n", "\t"):
     del _control_char_trans_newline[ord(x)]
-
 
 _control_char_trans = str.maketrans(_control_char_trans)
 _control_char_trans_newline = str.maketrans(_control_char_trans_newline)
@@ -141,3 +163,85 @@ def hexdump(s):
             False
         ))
         yield (offset, x, part_repr)
+
+
+def _move_to_private_code_plane(matchobj):
+    return chr(ord(matchobj.group(0)) + 0xE000)
+
+
+def _restore_from_private_code_plane(matchobj):
+    return chr(ord(matchobj.group(0)) - 0xE000)
+
+
+NO_ESCAPE = r"(?<!\\)(?:\\\\)*"
+MULTILINE_CONTENT = r"[\s\S]*?"
+SINGLELINE_CONTENT = r".*?"
+MULTILINE_CONTENT_LINE_CONTINUATION = r"(?:.|(?<=\\)\n)*?"
+
+
+def split_special_areas(
+        data: str,
+        area_delimiter: Iterable[str],
+):
+    """
+    Split a string of code into a [code, special area, code, special area, ..., code] list.
+
+    For example,
+
+    >>> split_special_areas(
+    >>>     "test /* don't modify me */ foo",
+    >>>     [r"/\\*[\\s\\S]*?\\*/"])  # (regex matching comments)
+    ["test ", "/* don't modify me */", " foo"]
+
+    "".join(split_special_areas(x, ...)) == x always holds true.
+    """
+    return re.split(
+        "({})".format("|".join(area_delimiter)),
+        data,
+        flags=re.MULTILINE
+    )
+
+
+def escape_special_areas(
+        data: str,
+        area_delimiter: Iterable[str],
+        control_characters,
+):
+    """
+    Escape all control characters present in special areas with UTF8 symbols
+    in the private use plane (U+E000 t+ ord(char)).
+    This is useful so that one can then use regex replacements on the resulting string without
+    interfering with special areas.
+
+    control_characters must be 0 < ord(x) < 256.
+
+    Example:
+
+    >>> print(x)
+    if (true) { console.log('{}'); }
+    >>> x = escape_special_areas(x, "{", ["'" + SINGLELINE_CONTENT + "'"])
+    >>> print(x)
+    if (true) { console.log('�}'); }
+    >>> x = re.sub(r"\\s*{\\s*", " {\n    ", x)
+    >>> x = unescape_special_areas(x)
+    >>> print(x)
+    if (true) {
+        console.log('{}'); }
+    """
+    buf = io.StringIO()
+    parts = split_special_areas(data, area_delimiter)
+    rex = re.compile(r"[{}]".format(control_characters))
+    for i, x in enumerate(parts):
+        if i % 2:
+            x = rex.sub(_move_to_private_code_plane, x)
+        buf.write(x)
+    return buf.getvalue()
+
+
+def unescape_special_areas(data: str):
+    """
+    Invert escape_special_areas.
+
+    x == unescape_special_areas(escape_special_areas(x)) always holds true.
+    """
+    return re.sub(r"[\ue000-\ue0ff]", _restore_from_private_code_plane, data)

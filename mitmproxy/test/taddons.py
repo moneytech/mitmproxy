@@ -1,13 +1,13 @@
-import sys
 import contextlib
+import asyncio
+import sys
 
 import mitmproxy.master
 import mitmproxy.options
-from mitmproxy import proxy
 from mitmproxy import addonmanager
-from mitmproxy import eventsequence
 from mitmproxy import command
-from mitmproxy.addons import script
+from mitmproxy import eventsequence
+from mitmproxy.addons import script, core
 
 
 class TestAddons(addonmanager.AddonManager):
@@ -17,8 +17,6 @@ class TestAddons(addonmanager.AddonManager):
     def trigger(self, event, *args, **kwargs):
         if event == "log":
             self.master.logs.append(args[0])
-        else:
-            self.master.events.append((event, args, kwargs))
         super().trigger(event, *args, **kwargs)
 
 
@@ -26,7 +24,6 @@ class RecordingMaster(mitmproxy.master.Master):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.addons = TestAddons(self)
-        self.events = []
         self.logs = []
 
     def dump_log(self, outf=sys.stdout):
@@ -41,10 +38,12 @@ class RecordingMaster(mitmproxy.master.Master):
                 return True
         return False
 
-    def has_event(self, name):
-        for i in self.events:
-            if i[0] == name:
+    async def await_log(self, txt, level=None):
+        for i in range(20):
+            if self.has_log(txt, level):
                 return True
+            else:
+                await asyncio.sleep(0.1)
         return False
 
     def clear(self):
@@ -57,28 +56,24 @@ class context:
         handlers can run as they would within mitmproxy. The context also
         provides a number of helper methods for common testing scenarios.
     """
-    def __init__(self, master = None, options = None):
+
+    def __init__(self, *addons, options=None, loadcore=True):
         options = options or mitmproxy.options.Options()
-        self.master = master or RecordingMaster(
-            options, proxy.DummyServer(options)
+        self.master = RecordingMaster(
+            options
         )
         self.options = self.master.options
-        self.wrapped = None
 
-    def ctx(self):
-        """
-            Returns a new handler context.
-        """
-        return self.master.handlecontext()
+        if loadcore:
+            self.master.addons.add(core.Core())
+
+        for a in addons:
+            self.master.addons.add(a)
 
     def __enter__(self):
-        self.wrapped = self.ctx()
-        self.wrapped.__enter__()
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        self.wrapped.__exit__(exc_type, exc_value, traceback)
-        self.wrapped = None
         return False
 
     @contextlib.contextmanager
@@ -103,23 +98,19 @@ class context:
             Options object with the given keyword arguments, then calls the
             configure method on the addon with the updated value.
         """
+        if addon not in self.master.addons:
+            self.master.addons.register(addon)
         with self.options.rollback(kwargs.keys(), reraise=True):
-            self.options.update(**kwargs)
-            self.master.addons.invoke_addon(
-                addon,
-                "configure",
-                kwargs.keys()
-            )
+            if kwargs:
+                self.options.update(**kwargs)
+            else:
+                self.master.addons.invoke_addon(addon, "configure", {})
 
     def script(self, path):
         """
             Loads a script from path, and returns the enclosed addon.
         """
-        sc = script.Script(path)
-        loader = addonmanager.Loader(self.master)
-        self.master.addons.invoke_addon(sc, "load", loader)
-        self.configure(sc)
-        self.master.addons.invoke_addon(sc, "tick")
+        sc = script.Script(path, False)
         return sc.addons[0] if sc.addons else None
 
     def invoke(self, addon, event, *args, **kwargs):
@@ -130,7 +121,7 @@ class context:
 
     def command(self, func, *args):
         """
-            Invoke a command function with a list of string arguments within a command context, mimicing the actual command environment.
+            Invoke a command function with a list of string arguments within a command context, mimicking the actual command environment.
         """
         cmd = command.Command(self.master.commands, "test.command", func)
         return cmd.call(args)

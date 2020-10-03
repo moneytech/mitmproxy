@@ -1,11 +1,9 @@
 from mitmproxy.net.http import url
-from mitmproxy.types import multidict
 from . import base
 
 
 class ViewURLEncoded(base.View):
     name = "URL-encoded"
-    prompt = ("urlencoded", "u")
     content_types = ["application/x-www-form-urlencoded"]
 
     def __call__(self, data, **metadata):
@@ -14,4 +12,4 @@ class ViewURLEncoded(base.View):
         except ValueError:
             return None
         d = url.decode(data)
-        return "URLEncoded form", base.format_dict(multidict.MultiDict(d))
+        return "URLEncoded form", base.format_pairs(d)

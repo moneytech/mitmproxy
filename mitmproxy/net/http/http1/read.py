@@ -1,13 +1,13 @@
-import time
-import sys
 import re
+import sys
+import time
+import typing
 
+from mitmproxy import exceptions
+from mitmproxy.net.http import headers
 from mitmproxy.net.http import request
 from mitmproxy.net.http import response
-from mitmproxy.net.http import headers
 from mitmproxy.net.http import url
-from mitmproxy.net import check
-from mitmproxy import exceptions
 
 
 def get_header_tokens(headers, key):
@@ -43,13 +43,13 @@ def read_request_head(rfile):
     Raises:
         exceptions.HttpReadDisconnect: No bytes can be read from rfile.
         exceptions.HttpSyntaxException: The input is malformed HTTP.
-        exceptions.HttpException: Any other error occured.
+        exceptions.HttpException: Any other error occurred.
     """
     timestamp_start = time.time()
     if hasattr(rfile, "reset_timestamps"):
         rfile.reset_timestamps()
 
-    form, method, scheme, host, port, path, http_version = _read_request_line(rfile)
+    host, port, method, scheme, authority, path, http_version = _read_request_line(rfile)
     headers = _read_headers(rfile)
 
     if hasattr(rfile, "first_byte_timestamp"):
@@ -57,7 +57,7 @@ def read_request_head(rfile):
         timestamp_start = rfile.first_byte_timestamp
 
     return request.Request(
-        form, method, scheme, host, port, path, http_version, headers, None, timestamp_start
+        host, port, method, scheme, authority, path, http_version, headers, None, None, timestamp_start, None
     )
 
 
@@ -82,7 +82,7 @@ def read_response_head(rfile):
     Raises:
         exceptions.HttpReadDisconnect: No bytes can be read from rfile.
         exceptions.HttpSyntaxException: The input is malformed HTTP.
-        exceptions.HttpException: Any other error occured.
+        exceptions.HttpException: Any other error occurred.
     """
 
     timestamp_start = time.time()
@@ -96,7 +96,7 @@ def read_response_head(rfile):
         # more accurate timestamp_start
         timestamp_start = rfile.first_byte_timestamp
 
-    return response.Response(http_version, status_code, message, headers, None, timestamp_start)
+    return response.Response(http_version, status_code, message, headers, None, None, timestamp_start, None)
 
 
 def read_body(rfile, expected_size, limit=None, max_chunk_size=4096):
@@ -171,8 +171,15 @@ def connection_close(http_version, headers):
     return http_version != "HTTP/1.1" and http_version != b"HTTP/1.1"
 
 
-def expected_http_body_size(request, response=None):
+def expected_http_body_size(
+        request: request.Request,
+        response: typing.Optional[response.Response] = None,
+        expect_continue_as_0: bool = True
+):
     """
+        Args:
+            - expect_continue_as_0: If true, incorrectly predict a body size of 0 for requests which are waiting
+              for a 100 Continue response.
         Returns:
             The expected body length:
             - a positive integer, if the size is known in advance
@@ -186,37 +193,34 @@ def expected_http_body_size(request, response=None):
     # http://tools.ietf.org/html/rfc7230#section-3.3
     if not response:
         headers = request.headers
-        response_code = None
-        is_request = True
+        if expect_continue_as_0 and headers.get("expect", "").lower() == "100-continue":
+            return 0
     else:
         headers = response.headers
-        response_code = response.status_code
-        is_request = False
-
-    if is_request:
-        if headers.get("expect", "").lower() == "100-continue":
-            return 0
-    else:
         if request.method.upper() == "HEAD":
             return 0
-        if 100 <= response_code <= 199:
+        if 100 <= response.status_code <= 199:
             return 0
-        if response_code == 200 and request.method.upper() == "CONNECT":
+        if response.status_code == 200 and request.method.upper() == "CONNECT":
             return 0
-        if response_code in (204, 304):
+        if response.status_code in (204, 304):
             return 0
 
     if "chunked" in headers.get("transfer-encoding", "").lower():
         return None
     if "content-length" in headers:
         try:
-            size = int(headers["content-length"])
+            sizes = headers.get_all("content-length")
+            different_content_length_headers = any(x != sizes[0] for x in sizes)
+            if different_content_length_headers:
+                raise exceptions.HttpSyntaxException("Conflicting Content Length Headers")
+            size = int(sizes[0])
             if size < 0:
                 raise ValueError()
             return size
-        except ValueError:
-            raise exceptions.HttpSyntaxException("Unparseable Content Length")
-    if is_request:
+        except ValueError as e:
+            raise exceptions.HttpSyntaxException("Unparseable Content Length") from e
+    if not response:
         return 0
     return -1
 
@@ -242,45 +246,32 @@ def _read_request_line(rfile):
         raise exceptions.HttpReadDisconnect("Client disconnected")
 
     try:
-        method, path, http_version = line.split()
+        method, target, http_version = line.split()
 
-        if path == b"*" or path.startswith(b"/"):
-            form = "relative"
-            scheme, host, port = None, None, None
+        if target == b"*" or target.startswith(b"/"):
+            scheme, authority, path = b"", b"", target
+            host, port = "", 0
         elif method == b"CONNECT":
-            form = "authority"
-            host, port = _parse_authority_form(path)
-            scheme, path = None, None
+            scheme, authority, path = b"", target, b""
+            host, port = url.parse_authority(authority, check=True)
+            if not port:
+                raise ValueError
         else:
-            form = "absolute"
-            scheme, host, port, path = url.parse(path)
+            scheme, rest = target.split(b"://", maxsplit=1)
+            authority, path_ = rest.split(b"/", maxsplit=1)
+            path = b"/" + path_
+            host, port = url.parse_authority(authority, check=True)
+            port = port or url.default_port(scheme)
+            if not port:
+                raise ValueError
+            # TODO: we can probably get rid of this check?
+            url.parse(target)
 
         _check_http_version(http_version)
     except ValueError:
-        raise exceptions.HttpSyntaxException("Bad HTTP request line: {}".format(line))
+        raise exceptions.HttpSyntaxException(f"Bad HTTP request line: {line}")
 
-    return form, method, scheme, host, port, path, http_version
-
-
-def _parse_authority_form(hostport):
-    """
-        Returns (host, port) if hostport is a valid authority-form host specification.
-        http://tools.ietf.org/html/draft-luotonen-web-proxy-tunneling-01 section 3.1
-
-        Raises:
-            ValueError, if the input is malformed
-    """
-    try:
-        host, port = hostport.rsplit(b":", 1)
-        if host.startswith(b"[") and host.endswith(b"]"):
-            host = host[1:-1]
-        port = int(port)
-        if not check.is_valid_host(host) or not check.is_valid_port(port):
-            raise ValueError()
-    except ValueError:
-        raise exceptions.HttpSyntaxException("Invalid host specification: {}".format(hostport))
-
-    return host, port
+    return host, port, method, scheme, authority, path, http_version
 
 
 def _read_response_line(rfile):
@@ -325,7 +316,8 @@ def _read_headers(rfile):
     while True:
         line = rfile.readline()
         if not line or line == b"\r\n" or line == b"\n":
-            break
+            # we do have coverage of this, but coverage.py does not detect it.
+            break  # pragma: no cover
         if line[0] in b" \t":
             if not ret:
                 raise exceptions.HttpSyntaxException("Invalid headers")

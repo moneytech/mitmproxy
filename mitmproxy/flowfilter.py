@@ -22,7 +22,7 @@
 
         ~b rex      Expression in the body of either request or response
         ~bq rex     Expression in the body of request
-        ~bq rex     Expression in the body of response
+        ~bs rex     Expression in the body of response
         ~t rex      Shortcut for content-type header.
 
         ~d rex      Request domain
@@ -32,19 +32,18 @@
         rex         Equivalent to ~u rex
 """
 
+import functools
 import re
 import sys
-import functools
-
-from mitmproxy import http
-from mitmproxy import websocket
-from mitmproxy import tcp
-from mitmproxy import flow
-
-from mitmproxy.utils import strutils
+from typing import Callable, ClassVar, Optional, Sequence, Type
 
 import pyparsing as pp
-from typing import Callable, Sequence, Type  # noqa
+
+from mitmproxy import flow
+from mitmproxy import http
+from mitmproxy import tcp
+from mitmproxy import websocket
+from mitmproxy.net import websockets as net_websockets
 
 
 def only(*types):
@@ -54,7 +53,9 @@ def only(*types):
             if isinstance(flow, types):
                 return fn(self, flow)
             return False
+
         return filter_types
+
     return decorator
 
 
@@ -69,8 +70,8 @@ class _Token:
 
 
 class _Action(_Token):
-    code = None  # type: str
-    help = None  # type: str
+    code: ClassVar[str]
+    help: ClassVar[str]
 
     @classmethod
     def make(klass, s, loc, toks):
@@ -104,11 +105,15 @@ class FHTTP(_Action):
 
 class FWebSocket(_Action):
     code = "websocket"
-    help = "Match WebSocket flows"
+    help = "Match WebSocket flows (and HTTP-WebSocket handshake flows)"
 
-    @only(websocket.WebSocketFlow)
+    @only(http.HTTPFlow, websocket.WebSocketFlow)
     def __call__(self, f):
-        return True
+        m = (
+            (isinstance(f, http.HTTPFlow) and f.request and net_websockets.check_handshake(f.request.headers))
+            or isinstance(f, websocket.WebSocketFlow)
+        )
+        return m
 
 
 class FTCP(_Action):
@@ -146,10 +151,10 @@ class _Rex(_Action):
     def __init__(self, expr):
         self.expr = expr
         if self.is_binary:
-            expr = strutils.escaped_str_to_bytes(expr)
+            expr = expr.encode()
         try:
             self.re = re.compile(expr, self.flags)
-        except:
+        except Exception:
             raise ValueError("Cannot compile expression.")
 
 
@@ -322,8 +327,10 @@ class FDomain(_Rex):
     flags = re.IGNORECASE
     is_binary = False
 
-    @only(http.HTTPFlow)
+    @only(http.HTTPFlow, websocket.WebSocketFlow)
     def __call__(self, f):
+        if isinstance(f, websocket.WebSocketFlow):
+            f = f.handshake_flow
         return bool(
             self.re.search(f.request.host) or
             self.re.search(f.request.pretty_host)
@@ -334,6 +341,7 @@ class FUrl(_Rex):
     code = "u"
     help = "URL"
     is_binary = False
+
     # FUrl is special, because it can be "naked".
 
     @classmethod
@@ -342,8 +350,12 @@ class FUrl(_Rex):
             toks = toks[1:]
         return klass(*toks)
 
-    @only(http.HTTPFlow)
+    @only(http.HTTPFlow, websocket.WebSocketFlow)
     def __call__(self, f):
+        if isinstance(f, websocket.WebSocketFlow):
+            f = f.handshake_flow
+        if not f or not f.request:
+            return False
         return self.re.search(f.request.pretty_url)
 
 
@@ -428,7 +440,7 @@ class FNot(_Token):
         return not self.itm(f)
 
 
-filter_unary = [
+filter_unary: Sequence[Type[_Action]] = [
     FAsset,
     FErr,
     FHTTP,
@@ -437,8 +449,8 @@ filter_unary = [
     FResp,
     FTCP,
     FWebSocket,
-]  # type: Sequence[Type[_Action]]
-filter_rex = [
+]
+filter_rex: Sequence[Type[_Rex]] = [
     FBod,
     FBodRequest,
     FBodResponse,
@@ -453,7 +465,7 @@ filter_rex = [
     FMethod,
     FSrc,
     FUrl,
-]  # type: Sequence[Type[_Rex]]
+]
 filter_int = [
     FCode
 ]
@@ -463,45 +475,51 @@ def _make():
     # Order is important - multi-char expressions need to come before narrow
     # ones.
     parts = []
-    for klass in filter_unary:
-        f = pp.Literal("~%s" % klass.code) + pp.WordEnd()
-        f.setParseAction(klass.make)
+    for cls in filter_unary:
+        f = pp.Literal(f"~{cls.code}") + pp.WordEnd()
+        f.setParseAction(cls.make)
         parts.append(f)
 
-    simplerex = "".join(c for c in pp.printables if c not in "()~'\"")
-    rex = pp.Word(simplerex) |\
-        pp.QuotedString("\"", escChar='\\') |\
-        pp.QuotedString("'", escChar='\\')
-    for klass in filter_rex:
-        f = pp.Literal("~%s" % klass.code) + pp.WordEnd() + rex.copy()
-        f.setParseAction(klass.make)
+    # This is a bit of a hack to simulate Word(pyparsing_unicode.printables),
+    # which has a horrible performance with len(pyparsing.pyparsing_unicode.printables) == 1114060
+    unicode_words = pp.CharsNotIn("()~'\"" + pp.ParserElement.DEFAULT_WHITE_CHARS)
+    unicode_words.skipWhitespace = True
+    regex = (
+            unicode_words
+            | pp.QuotedString('"', escChar='\\')
+            | pp.QuotedString("'", escChar='\\')
+    )
+    for cls in filter_rex:
+        f = pp.Literal(f"~{cls.code}") + pp.WordEnd() + regex.copy()
+        f.setParseAction(cls.make)
         parts.append(f)
 
-    for klass in filter_int:
-        f = pp.Literal("~%s" % klass.code) + pp.WordEnd() + pp.Word(pp.nums)
-        f.setParseAction(klass.make)
+    for cls in filter_int:
+        f = pp.Literal(f"~{cls.code}") + pp.WordEnd() + pp.Word(pp.nums)
+        f.setParseAction(cls.make)
         parts.append(f)
 
     # A naked rex is a URL rex:
-    f = rex.copy()
+    f = regex.copy()
     f.setParseAction(FUrl.make)
     parts.append(f)
 
     atom = pp.MatchFirst(parts)
-    expr = pp.operatorPrecedence(atom,
-                                 [(pp.Literal("!").suppress(),
-                                   1,
-                                   pp.opAssoc.RIGHT,
-                                   lambda x: FNot(*x)),
-                                     (pp.Literal("&").suppress(),
-                                      2,
-                                      pp.opAssoc.LEFT,
-                                      lambda x: FAnd(*x)),
-                                     (pp.Literal("|").suppress(),
-                                      2,
-                                      pp.opAssoc.LEFT,
-                                      lambda x: FOr(*x)),
-                                  ])
+    expr = pp.infixNotation(
+        atom,
+        [(pp.Literal("!").suppress(),
+          1,
+          pp.opAssoc.RIGHT,
+          lambda x: FNot(*x)),
+         (pp.Literal("&").suppress(),
+          2,
+          pp.opAssoc.LEFT,
+          lambda x: FAnd(*x)),
+         (pp.Literal("|").suppress(),
+          2,
+          pp.opAssoc.LEFT,
+          lambda x: FOr(*x)),
+         ])
     expr = pp.OneOrMore(expr)
     return expr.setParseAction(lambda x: FAnd(x) if len(x) != 1 else x)
 
@@ -510,7 +528,7 @@ bnf = _make()
 TFilter = Callable[[flow.Flow], bool]
 
 
-def parse(s: str) -> TFilter:
+def parse(s: str) -> Optional[TFilter]:
     try:
         flt = bnf.parseString(s, parseAll=True)[0]
         flt.pattern = s
@@ -541,15 +559,15 @@ def match(flt, flow):
 help = []
 for a in filter_unary:
     help.append(
-        ("~%s" % a.code, a.help)
+        (f"~{a.code}", a.help)
     )
 for b in filter_rex:
     help.append(
-        ("~%s regex" % b.code, b.help)
+        (f"~{b.code} regex", b.help)
     )
 for c in filter_int:
     help.append(
-        ("~%s int" % c.code, c.help)
+        (f"~{c.code} int", c.help)
     )
 help.sort()
 help.extend(

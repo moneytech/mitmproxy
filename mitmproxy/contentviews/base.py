@@ -1,20 +1,18 @@
 # Default view cutoff *in lines*
-
-from typing import Iterable, AnyStr, List
-from typing import Mapping
-from typing import Tuple
-
-VIEW_CUTOFF = 512
+import typing
 
 KEY_MAX = 30
 
+TTextType = typing.Union[str, bytes]  # FIXME: This should be either bytes or str ultimately.
+TViewLine = typing.List[typing.Tuple[str, TTextType]]
+TViewResult = typing.Tuple[str, typing.Iterator[TViewLine]]
+
 
 class View:
-    name = None  # type: str
-    prompt = None  # type: Tuple[str,str]
-    content_types = []  # type: List[str]
+    name: typing.ClassVar[str]
+    content_types: typing.ClassVar[typing.List[str]] = []
 
-    def __call__(self, data: bytes, **metadata):
+    def __call__(self, data: bytes, **metadata) -> TViewResult:
         """
         Transform raw data into human-readable output.
 
@@ -37,27 +35,53 @@ class View:
         raise NotImplementedError()  # pragma: no cover
 
 
-def format_dict(
-        d: Mapping[AnyStr, AnyStr]
-) -> Iterable[List[Tuple[str, AnyStr]]]:
+def format_pairs(
+        items: typing.Iterable[typing.Tuple[TTextType, TTextType]]
+) -> typing.Iterator[TViewLine]:
+
     """
-    Helper function that transforms the given dictionary into a list of
-        ("key",   key  )
+    Helper function that accepts a list of (k,v) pairs into a list of
+    [
+        ("key", key    )
         ("value", value)
-    tuples, where key is padded to a uniform width.
+    ]
+    where key is padded to a uniform width
     """
-    max_key_len = max(len(k) for k in d.keys())
-    max_key_len = min(max_key_len, KEY_MAX)
-    for key, value in d.items():
-        key += b":" if isinstance(key, bytes) else u":"
+
+    max_key_len = max((len(k[0]) for k in items), default=0)
+    max_key_len = min((max_key_len, KEY_MAX), default=0)
+
+    for key, value in items:
+        if isinstance(key, bytes):
+
+            key += b":"
+        else:
+            key += ":"
+
         key = key.ljust(max_key_len + 2)
+
         yield [
             ("header", key),
             ("text", value)
         ]
 
 
-def format_text(text: AnyStr) -> Iterable[List[Tuple[str, AnyStr]]]:
+def format_dict(
+        d: typing.Mapping[TTextType, TTextType]
+) -> typing.Iterator[TViewLine]:
+    """
+    Helper function that transforms the given dictionary into a list of
+    [
+        ("key",   key  )
+        ("value", value)
+    ]
+    entries, where key is padded to a uniform width.
+    """
+
+    return format_pairs(d.items())
+
+
+def format_text(text: TTextType) -> typing.Iterator[TViewLine]:
     """
     Helper function that transforms bytes into the view output format.
     """

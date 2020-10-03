@@ -70,7 +70,12 @@ def test_defaults():
 def test_required_int():
     o = TO()
     with pytest.raises(exceptions.OptionsError):
-        o.parse_setval("required_int", None)
+        o.parse_setval(o._options["required_int"], None)
+
+
+def test_deepcopy():
+    o = TD()
+    copy.deepcopy(o)
 
 
 def test_options():
@@ -229,6 +234,10 @@ def test_simple():
     assert "one" in TO()
 
 
+def test_items():
+    assert TO().items()
+
+
 def test_serialize():
     o = TD2()
     o.three = "set"
@@ -240,6 +249,7 @@ def test_serialize():
     o2 = TD2()
     optmanager.load(o2, data)
     assert o2 == o
+    assert not o == 42
 
     t = """
         unknown: foo
@@ -257,9 +267,15 @@ def test_serialize():
     with pytest.raises(Exception, match="Config error"):
         optmanager.load(o2, t)
 
+    t = "# a comment"
+    optmanager.load(o2, t)
+    optmanager.load(o2, "foobar: '123'")
+    assert o2.deferred == {"foobar": "123"}
+
     t = ""
     optmanager.load(o2, t)
-    assert optmanager.load(o2, "foobar: '123'") == {"foobar": "123"}
+    optmanager.load(o2, "foobar: '123'")
+    assert o2.deferred == {"foobar": "123"}
 
 
 def test_serialize_defaults():
@@ -283,7 +299,8 @@ def test_saving(tmpdir):
 
     with open(dst, 'a') as f:
         f.write("foobar: '123'")
-    assert optmanager.load_paths(o, dst) == {"foobar": "123"}
+    optmanager.load_paths(o, dst)
+    assert o.deferred == {"foobar": "123"}
 
     with open(dst, 'a') as f:
         f.write("'''")
@@ -334,6 +351,12 @@ def test_dump_defaults():
     assert optmanager.dump_defaults(o)
 
 
+def test_dump_dicts():
+    o = options.Options()
+    assert optmanager.dump_dicts(o)
+    assert optmanager.dump_dicts(o, ['http2', 'listen_port'])
+
+
 class TTypes(optmanager.OptManager):
     def __init__(self):
         super().__init__()
@@ -355,8 +378,12 @@ def test_make_parser():
     opts.make_parser(parser, "int", short="c")
     opts.make_parser(parser, "seqstr", short="d")
     opts.make_parser(parser, "bool_on", short="e")
+
     with pytest.raises(ValueError):
         opts.make_parser(parser, "unknown")
+
+    # Nonexistent options ignore
+    opts.make_parser(parser, "nonexistentxxx")
 
 
 def test_set():
@@ -402,4 +429,13 @@ def test_set():
     assert opts.seqstr == []
 
     with pytest.raises(exceptions.OptionsError):
-        opts.set("nonexistent=wobble")
+        opts.set("deferredoption=wobble")
+
+    opts.set("deferredoption=wobble", defer=True)
+    assert "deferredoption" in opts.deferred
+    opts.process_deferred()
+    assert "deferredoption" in opts.deferred
+    opts.add_option("deferredoption", str, "default", "help")
+    opts.process_deferred()
+    assert "deferredoption" not in opts.deferred
+    assert opts.deferredoption == "wobble"

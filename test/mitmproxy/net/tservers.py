@@ -4,7 +4,9 @@ import io
 import OpenSSL
 
 from mitmproxy.net import tcp
-from mitmproxy.test import tutils
+from mitmproxy.utils import data
+
+cdata = data.Data(__name__)
 
 
 class _ServerThread(threading.Thread):
@@ -15,9 +17,6 @@ class _ServerThread(threading.Thread):
 
     def run(self):
         self.server.serve_forever()
-
-    def shutdown(self):
-        self.server.shutdown()
 
 
 class _TServer(tcp.TCPServer):
@@ -50,21 +49,22 @@ class _TServer(tcp.TCPServer):
         if self.ssl is not None:
             cert = self.ssl.get(
                 "cert",
-                tutils.test_data.path("mitmproxy/net/data/server.crt"))
+                cdata.path("data/server.crt"))
             raw_key = self.ssl.get(
                 "key",
-                tutils.test_data.path("mitmproxy/net/data/server.key"))
-            key = OpenSSL.crypto.load_privatekey(
-                OpenSSL.crypto.FILETYPE_PEM,
-                open(raw_key, "rb").read())
+                cdata.path("data/server.key"))
+            with open(raw_key) as f:
+                raw_key = f.read()
+            key = OpenSSL.crypto.load_privatekey(OpenSSL.crypto.FILETYPE_PEM, raw_key)
             if self.ssl.get("v3_only", False):
                 method = OpenSSL.SSL.SSLv3_METHOD
                 options = OpenSSL.SSL.OP_NO_SSLv2 | OpenSSL.SSL.OP_NO_TLSv1
             else:
                 method = OpenSSL.SSL.SSLv23_METHOD
                 options = None
-            h.convert_to_ssl(
-                cert, key,
+            h.convert_to_tls(
+                cert,
+                key,
                 method=method,
                 options=options,
                 handle_sni=getattr(h, "handle_sni", None),
@@ -103,7 +103,7 @@ class ServerTestBase:
 
     @classmethod
     def teardown_class(cls):
-        cls.server.shutdown()
+        cls.server.server.shutdown()
 
     def teardown(self):
         self.server.server.wait_for_silence()

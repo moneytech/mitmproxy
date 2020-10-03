@@ -15,7 +15,6 @@ def test_assemble_request():
         b"GET /path HTTP/1.1\r\n"
         b"header: qvalue\r\n"
         b"content-length: 7\r\n"
-        b"host: address:22\r\n"
         b"\r\n"
         b"content"
     )
@@ -66,14 +65,11 @@ def test_assemble_body():
 def test_assemble_request_line():
     assert _assemble_request_line(treq().data) == b"GET /path HTTP/1.1"
 
-    authority_request = treq(method=b"CONNECT", first_line_format="authority").data
+    authority_request = treq(method=b"CONNECT", authority=b"address:22").data
     assert _assemble_request_line(authority_request) == b"CONNECT address:22 HTTP/1.1"
 
-    absolute_request = treq(first_line_format="absolute").data
+    absolute_request = treq(scheme=b"http", authority=b"address:22").data
     assert _assemble_request_line(absolute_request) == b"GET http://address:22/path HTTP/1.1"
-
-    with pytest.raises(RuntimeError):
-        _assemble_request_line(treq(first_line_format="invalid_form").data)
 
 
 def test_assemble_request_headers():
@@ -82,17 +78,6 @@ def test_assemble_request_headers():
     r.headers["Transfer-Encoding"] = "chunked"
     c = _assemble_request_headers(r.data)
     assert b"Transfer-Encoding" in c
-
-
-def test_assemble_request_headers_host_header():
-    r = treq()
-    r.headers = Headers()
-    c = _assemble_request_headers(r.data)
-    assert b"host" in c
-
-    r.host = None
-    c = _assemble_request_headers(r.data)
-    assert b"host" not in c
 
 
 def test_assemble_response_headers():

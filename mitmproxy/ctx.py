@@ -1,7 +1,7 @@
-import mitmproxy.master  # noqa
-import mitmproxy.log  # noqa
-import mitmproxy.options  # noqa
+import mitmproxy.log
+import mitmproxy.master
+import mitmproxy.options
 
-master = None  # type: "mitmproxy.master.Master"
-log = None  # type: "mitmproxy.log.Log"
-options = None  # type: "mitmproxy.options.Options"
+log: "mitmproxy.log.Log"
+master: "mitmproxy.master.Master"
+options: "mitmproxy.options.Options"

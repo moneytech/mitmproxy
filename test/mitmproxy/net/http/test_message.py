@@ -48,6 +48,12 @@ class TestMessageData:
 
         assert data != 0
 
+    def test_serializable(self):
+        data1 = tutils.tresp(timestamp_start=42, timestamp_end=42).data
+        data2 = tutils.tresp().data.from_state(data1.get_state())  # ResponseData.from_state()
+
+        assert data1 == data2
+
 
 class TestMessage:
 
@@ -58,17 +64,17 @@ class TestMessage:
     def test_eq_ne(self):
         resp = tutils.tresp(timestamp_start=42, timestamp_end=42)
         same = tutils.tresp(timestamp_start=42, timestamp_end=42)
-        assert resp == same
+        assert resp.data == same.data
 
         other = tutils.tresp(timestamp_start=0, timestamp_end=0)
-        assert resp != other
+        assert resp.data != other.data
 
         assert resp != 0
 
     def test_serializable(self):
         resp = tutils.tresp()
         resp2 = http.Response.from_state(resp.get_state())
-        assert resp == resp2
+        assert resp.data == resp2.data
 
     def test_content_length_update(self):
         resp = tutils.tresp()
@@ -94,16 +100,6 @@ class TestMessage:
     def test_http_version(self):
         _test_decoded_attr(tutils.tresp(), "http_version")
 
-    def test_replace(self):
-        r = tutils.tresp()
-        r.content = b"foofootoo"
-        r.replace(b"foo", "gg")
-        assert r.content == b"ggggtoo"
-
-        r.content = b"foofootoo"
-        r.replace(b"foo", "gg", count=1)
-        assert r.content == b"ggfootoo"
-
 
 class TestMessageContentEncoding:
     def test_simple(self):
@@ -116,6 +112,14 @@ class TestMessageContentEncoding:
         assert r.raw_content != b"message"
         assert r.content == b"message"
         assert r.raw_content != b"message"
+
+    def test_update_content_length_header(self):
+        r = tutils.tresp()
+        assert int(r.headers["content-length"]) == 7
+        r.encode("gzip")
+        assert int(r.headers["content-length"]) == 27
+        r.decode()
+        assert int(r.headers["content-length"]) == 7
 
     def test_modify(self):
         r = tutils.tresp()
@@ -214,6 +218,37 @@ class TestMessageText:
         r = tutils.tresp(content=b'"\xc3\xbc"')
         r.headers["content-type"] = "application/json"
         assert r.text == u'"ü"'
+
+    def test_guess_meta_charset(self):
+        r = tutils.tresp(content=b'<meta http-equiv="content-type" '
+                                 b'content="text/html;charset=gb2312">\xe6\x98\x8e\xe4\xbc\xaf')
+        # "鏄庝集" is decoded form of \xe6\x98\x8e\xe4\xbc\xaf in gb18030
+        assert u"鏄庝集" in r.text
+
+    def test_guess_css_charset(self):
+        # @charset but not text/css
+        r = tutils.tresp(content=b'@charset "gb2312";'
+                                 b'#foo::before {content: "\xe6\x98\x8e\xe4\xbc\xaf"}')
+        # "鏄庝集" is decoded form of \xe6\x98\x8e\xe4\xbc\xaf in gb18030
+        assert u"鏄庝集" not in r.text
+
+        # @charset not at the beginning
+        r = tutils.tresp(content=b'foo@charset "gb2312";'
+                                 b'#foo::before {content: "\xe6\x98\x8e\xe4\xbc\xaf"}')
+        r.headers["content-type"] = "text/css"
+        # "鏄庝集" is decoded form of \xe6\x98\x8e\xe4\xbc\xaf in gb18030
+        assert u"鏄庝集" not in r.text
+
+        # @charset and text/css
+        r = tutils.tresp(content=b'@charset "gb2312";'
+                                 b'#foo::before {content: "\xe6\x98\x8e\xe4\xbc\xaf"}')
+        r.headers["content-type"] = "text/css"
+        # "鏄庝集" is decoded form of \xe6\x98\x8e\xe4\xbc\xaf in gb18030
+        assert u"鏄庝集" in r.text
+
+    def test_guess_latin_1(self):
+        r = tutils.tresp(content=b"\xF0\xE2")
+        assert r.text == u"ðâ"
 
     def test_none(self):
         r = tutils.tresp(content=None)

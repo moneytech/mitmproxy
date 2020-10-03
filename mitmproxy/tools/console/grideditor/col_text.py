@@ -21,14 +21,14 @@ class Column(col_bytes.Column):
         return TEdit(data, self.encoding_args)
 
     def blank(self):
-        return u""
+        return ""
 
 
 # This is the same for both edit and display.
 class EncodingMixin:
     def __init__(self, data, encoding_args):
         self.encoding_args = encoding_args
-        super().__init__(data.encode(*self.encoding_args))
+        super().__init__(data.__str__().encode(*self.encoding_args))
 
     def get_data(self):
         data = super().get_data()

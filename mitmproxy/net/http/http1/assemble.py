@@ -1,4 +1,3 @@
-import mitmproxy.net.http.url
 from mitmproxy import exceptions
 
 
@@ -46,31 +45,26 @@ def _assemble_request_line(request_data):
     Args:
         request_data (mitmproxy.net.http.request.RequestData)
     """
-    form = request_data.first_line_format
-    if form == "relative":
+    if request_data.method.upper() == b"CONNECT":
+        return b"%s %s %s" % (
+            request_data.method,
+            request_data.authority,
+            request_data.http_version
+        )
+    elif request_data.authority:
+        return b"%s %s://%s%s %s" % (
+            request_data.method,
+            request_data.scheme,
+            request_data.authority,
+            request_data.path,
+            request_data.http_version
+        )
+    else:
         return b"%s %s %s" % (
             request_data.method,
             request_data.path,
             request_data.http_version
         )
-    elif form == "authority":
-        return b"%s %s:%d %s" % (
-            request_data.method,
-            request_data.host,
-            request_data.port,
-            request_data.http_version
-        )
-    elif form == "absolute":
-        return b"%s %s://%s:%d%s %s" % (
-            request_data.method,
-            request_data.scheme,
-            request_data.host,
-            request_data.port,
-            request_data.path,
-            request_data.http_version
-        )
-    else:
-        raise RuntimeError("Invalid request form")
 
 
 def _assemble_request_headers(request_data):
@@ -78,15 +72,7 @@ def _assemble_request_headers(request_data):
     Args:
         request_data (mitmproxy.net.http.request.RequestData)
     """
-    headers = request_data.headers
-    if "host" not in headers and request_data.scheme and request_data.host and request_data.port:
-        headers = headers.copy()
-        headers["host"] = mitmproxy.net.http.url.hostport(
-            request_data.scheme,
-            request_data.host,
-            request_data.port
-        )
-    return bytes(headers)
+    return bytes(request_data.headers)
 
 
 def _assemble_response_line(response_data):

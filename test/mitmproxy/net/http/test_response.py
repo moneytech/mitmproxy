@@ -20,8 +20,11 @@ class TestResponseData:
             tresp(reason="fööbär")
         with pytest.raises(ValueError):
             tresp(content="foobar")
+        with pytest.raises(ValueError):
+            tresp(trailers="foobar")
 
         assert isinstance(tresp(headers=()).headers, Headers)
+        assert isinstance(tresp(trailers=()).trailers, Headers)
 
 
 class TestResponseCore:
@@ -30,9 +33,9 @@ class TestResponseCore:
     """
     def test_repr(self):
         response = tresp()
-        assert repr(response) == "Response(200 OK, unknown content type, 7b)"
+        assert repr(response) == "Response(200, unknown content type, 7b)"
         response.content = None
-        assert repr(response) == "Response(200 OK, no content)"
+        assert repr(response) == "Response(200, no content)"
 
     def test_make(self):
         r = Response.make()
@@ -55,6 +58,9 @@ class TestResponseCore:
         r = Response.make(headers=({"foo": "baz"}))
         assert r.headers["foo"] == "baz"
 
+        r = Response.make(headers=Headers(foo="qux"))
+        assert r.headers["foo"] == "qux"
+
         with pytest.raises(TypeError):
             Response.make(headers=42)
 
@@ -70,9 +76,6 @@ class TestResponseCore:
 
         resp.reason = b"DEF"
         assert resp.data.reason == b"DEF"
-
-        resp.reason = None
-        assert resp.data.reason is None
 
         resp.data.reason = b'cr\xe9e'
         assert resp.reason == "crée"
@@ -113,7 +116,7 @@ class TestResponseUtils:
         assert attrs["domain"] == "example.com"
         assert attrs["expires"] == "Wed Oct  21 16:29:41 2015"
         assert attrs["path"] == "/"
-        assert attrs["httponly"] is None
+        assert attrs["httponly"] == ""
 
     def test_get_cookies_no_value(self):
         resp = tresp()
@@ -148,12 +151,12 @@ class TestResponseUtils:
     def test_refresh(self):
         r = tresp()
         n = time.time()
-        r.headers["date"] = email.utils.formatdate(n)
+        r.headers["date"] = email.utils.formatdate(n, usegmt=True)
         pre = r.headers["date"]
-        r.refresh(n)
+        r.refresh(946681202)
         assert pre == r.headers["date"]
-        r.refresh(n + 60)
 
+        r.refresh(946681262)
         d = email.utils.parsedate_tz(r.headers["date"])
         d = email.utils.mktime_tz(d)
         # Weird that this is not exact...

@@ -1,16 +1,22 @@
 import pytest
 
 from mitmproxy.contentviews import xml_html
-from mitmproxy.test import tutils
 from . import full_eval
 
-data = tutils.test_data.push("mitmproxy/contentviews/test_xml_html_data/")
+datadir = "mitmproxy/contentviews/test_xml_html_data/"
 
 
-def test_simple():
+def test_simple(tdata):
     v = full_eval(xml_html.ViewXmlHtml())
     assert v(b"foo") == ('XML', [[('text', 'foo')]])
     assert v(b"<html></html>") == ('HTML', [[('text', '<html></html>')]])
+    assert v(b"<>") == ('XML', [[('text', '<>')]])
+    assert v(b"<p") == ('XML', [[('text', '<p')]])
+
+    with open(tdata.path(datadir + "simple.html")) as f:
+        input = f.read()
+    tokens = xml_html.tokenize(input)
+    assert str(next(tokens)) == "Tag(<!DOCTYPE html>)"
 
 
 @pytest.mark.parametrize("filename", [
@@ -18,9 +24,10 @@ def test_simple():
     "cdata.xml",
     "comment.xml",
     "inline.html",
+    "test.html"
 ])
-def test_format_xml(filename):
-    path = data.path(filename)
+def test_format_xml(filename, tdata):
+    path = tdata.path(datadir + filename)
     with open(path) as f:
         input = f.read()
     with open("-formatted.".join(path.rsplit(".", 1))) as f:

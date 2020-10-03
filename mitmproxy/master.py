@@ -1,19 +1,28 @@
+import sys
+import traceback
 import threading
-import contextlib
-import queue
+import asyncio
+import logging
 
 from mitmproxy import addonmanager
 from mitmproxy import options
 from mitmproxy import controller
 from mitmproxy import eventsequence
-from mitmproxy import exceptions
 from mitmproxy import command
 from mitmproxy import http
+from mitmproxy import websocket
 from mitmproxy import log
-from mitmproxy.proxy.protocol import http_replay
-from mitmproxy.types import basethread
+from mitmproxy.net import server_spec
+from mitmproxy.coretypes import basethread
 
 from . import ctx as mitmproxy_ctx
+
+
+# Conclusively preventing cross-thread races on proxy shutdown turns out to be
+# very hard. We could build a thread sync infrastructure for this, or we could
+# wait until we ditch threads and move all the protocols into the async loop.
+# Until then, silence non-critical errors.
+logging.getLogger('asyncio').setLevel(logging.CRITICAL)
 
 
 class ServerThread(basethread.BaseThread):
@@ -32,143 +41,127 @@ class Master:
     """
         The master handles mitmproxy's main event loop.
     """
-    def __init__(self, opts, server):
-        self.options = opts or options.Options()
+    def __init__(self, opts):
+        self.should_exit = threading.Event()
+        self.channel = controller.Channel(
+            self,
+            asyncio.get_event_loop(),
+            self.should_exit,
+        )
+
+        self.options: options.Options = opts or options.Options()
         self.commands = command.CommandManager(self)
         self.addons = addonmanager.AddonManager(self)
-        self.event_queue = queue.Queue()
-        self.should_exit = threading.Event()
-        self.server = server
-        self.first_tick = True
-        channel = controller.Channel(self.event_queue, self.should_exit)
-        server.set_channel(channel)
+        self._server = None
+        self.waiting_flows = []
+        self.log = log.Log(self)
 
-    @contextlib.contextmanager
-    def handlecontext(self):
-        # Handlecontexts also have to nest - leave cleanup to the outermost
-        if mitmproxy_ctx.master:
-            yield
-            return
         mitmproxy_ctx.master = self
-        mitmproxy_ctx.log = log.Log(self)
+        mitmproxy_ctx.log = self.log
         mitmproxy_ctx.options = self.options
-        try:
-            yield
-        finally:
-            mitmproxy_ctx.master = None
-            mitmproxy_ctx.log = None
-            mitmproxy_ctx.options = None
 
-    def tell(self, mtype, m):
-        m.reply = controller.DummyReply()
-        self.event_queue.put((mtype, m))
+    @property
+    def server(self):
+        return self._server
 
-    def add_log(self, e, level):
-        """
-            level: debug, info, warn, error
-        """
-        self.addons.trigger("log", log.LogEntry(e, level))
+    @server.setter
+    def server(self, server):
+        server.set_channel(self.channel)
+        self._server = server
 
     def start(self):
         self.should_exit.clear()
-        ServerThread(self.server).start()
+        if self.server:
+            ServerThread(self.server).start()
 
-    def run(self):
+    async def running(self):
+        self.addons.trigger("running")
+
+    def run_loop(self, loop):
         self.start()
+        asyncio.ensure_future(self.running())
+
+        exc = None
         try:
-            while not self.should_exit.is_set():
-                self.tick(0.1)
+            loop()
+        except Exception:  # pragma: no cover
+            exc = traceback.format_exc()
         finally:
-            self.shutdown()
+            if not self.should_exit.is_set():  # pragma: no cover
+                self.shutdown()
+            loop = asyncio.get_event_loop()
+            tasks = asyncio.all_tasks(loop) if sys.version_info >= (3, 7) else asyncio.Task.all_tasks(loop)
+            for p in tasks:
+                p.cancel()
+            loop.close()
 
-    def tick(self, timeout):
-        if self.first_tick:
-            self.first_tick = False
-            self.addons.trigger("running")
-        self.addons.trigger("tick")
-        changed = False
-        try:
-            mtype, obj = self.event_queue.get(timeout=timeout)
-            if mtype not in eventsequence.Events:
-                raise exceptions.ControlException(
-                    "Unknown event %s" % repr(mtype)
-                )
-            self.addons.handle_lifecycle(mtype, obj)
-            self.event_queue.task_done()
-            changed = True
-        except queue.Empty:
-            pass
-        return changed
+        if exc:  # pragma: no cover
+            print(exc, file=sys.stderr)
+            print("mitmproxy has crashed!", file=sys.stderr)
+            print("Please lodge a bug report at:", file=sys.stderr)
+            print("\thttps://github.com/mitmproxy/mitmproxy", file=sys.stderr)
 
-    def shutdown(self):
-        self.server.shutdown()
-        self.should_exit.set()
         self.addons.trigger("done")
 
-    def load_flow(self, f):
+    def run(self, func=None):
+        loop = asyncio.get_event_loop()
+        self.run_loop(loop.run_forever)
+
+    async def _shutdown(self):
+        self.should_exit.set()
+        if self.server:
+            self.server.shutdown()
+        loop = asyncio.get_event_loop()
+        loop.stop()
+
+    def shutdown(self):
         """
-        Loads a flow
+            Shut down the proxy. This method is thread-safe.
         """
+        if not self.should_exit.is_set():
+            self.should_exit.set()
+            ret = asyncio.run_coroutine_threadsafe(self._shutdown(), loop=self.channel.loop)
+            # Weird band-aid to make sure that self._shutdown() is actually executed,
+            # which otherwise hangs the process as the proxy server is threaded.
+            # This all needs to be simplified when the proxy server runs on asyncio as well.
+            if not self.channel.loop.is_running():  # pragma: no cover
+                try:
+                    self.channel.loop.run_until_complete(asyncio.wrap_future(ret))
+                except RuntimeError:
+                    pass  # Event loop stopped before Future completed.
+
+    def _change_reverse_host(self, f):
+        """
+        When we load flows in reverse proxy mode, we adjust the target host to
+        the reverse proxy destination for all flows we load. This makes it very
+        easy to replay saved flows against a different host.
+        """
+        if self.options.mode.startswith("reverse:"):
+            _, upstream_spec = server_spec.parse_with_mode(self.options.mode)
+            f.request.host, f.request.port = upstream_spec.address
+            f.request.scheme = upstream_spec.scheme
+
+    async def load_flow(self, f):
+        """
+        Loads a flow and links websocket & handshake flows
+        """
+
         if isinstance(f, http.HTTPFlow):
-            if self.server and self.options.mode.startswith("reverse:"):
-                f.request.host = self.server.config.upstream_server.address[0]
-                f.request.port = self.server.config.upstream_server.address[1]
-                f.request.scheme = self.server.config.upstream_server.scheme
+            self._change_reverse_host(f)
+            if 'websocket' in f.metadata:
+                self.waiting_flows.append(f)
+
+        if isinstance(f, websocket.WebSocketFlow):
+            hfs = [hf for hf in self.waiting_flows if hf.id == f.metadata['websocket_handshake']]
+            if hfs:
+                hf = hfs[0]
+                f.handshake_flow = hf
+                self.waiting_flows.remove(hf)
+                self._change_reverse_host(f.handshake_flow)
+            else:
+                # this will fail - but at least it will load the remaining flows
+                f.handshake_flow = http.HTTPFlow(None, None)
+
         f.reply = controller.DummyReply()
         for e, o in eventsequence.iterate(f):
-            self.addons.handle_lifecycle(e, o)
-
-    def replay_request(
-            self,
-            f: http.HTTPFlow,
-            block: bool=False
-    ) -> http_replay.RequestReplayThread:
-        """
-        Replay a HTTP request to receive a new response from the server.
-
-        Args:
-            f: The flow to replay.
-            block: If True, this function will wait for the replay to finish.
-                This causes a deadlock if activated in the main thread.
-
-        Returns:
-            The thread object doing the replay.
-
-        Raises:
-            exceptions.ReplayException, if the flow is in a state
-            where it is ineligible for replay.
-        """
-
-        if f.live:
-            raise exceptions.ReplayException(
-                "Can't replay live flow."
-            )
-        if f.intercepted:
-            raise exceptions.ReplayException(
-                "Can't replay intercepted flow."
-            )
-        if f.request.raw_content is None:
-            raise exceptions.ReplayException(
-                "Can't replay flow with missing content."
-            )
-        if not f.request:
-            raise exceptions.ReplayException(
-                "Can't replay flow with missing request."
-            )
-
-        f.backup()
-        f.request.is_replay = True
-
-        f.response = None
-        f.error = None
-
-        rt = http_replay.RequestReplayThread(
-            self.server.config,
-            f,
-            self.event_queue,
-            self.should_exit
-        )
-        rt.start()  # pragma: no cover
-        if block:
-            rt.join()
-        return rt
+            await self.addons.handle_lifecycle(e, o)

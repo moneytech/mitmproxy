@@ -1,168 +1,38 @@
 import html
-from typing import Optional
-
+import time
+from typing import Optional, Tuple
+from mitmproxy import connections
 from mitmproxy import flow
-
-from mitmproxy.net import http
 from mitmproxy import version
-from mitmproxy import connections  # noqa
+from mitmproxy.net import http
 
-
-class HTTPRequest(http.Request):
-
-    """
-    A mitmproxy HTTP request.
-    """
-
-    # This is a very thin wrapper on top of :py:class:`mitmproxy.net.http.Request` and
-    # may be removed in the future.
-
-    def __init__(
-            self,
-            first_line_format,
-            method,
-            scheme,
-            host,
-            port,
-            path,
-            http_version,
-            headers,
-            content,
-            timestamp_start=None,
-            timestamp_end=None,
-            is_replay=False,
-    ):
-        http.Request.__init__(
-            self,
-            first_line_format,
-            method,
-            scheme,
-            host,
-            port,
-            path,
-            http_version,
-            headers,
-            content,
-            timestamp_start,
-            timestamp_end,
-        )
-        # Is this request replayed?
-        self.is_replay = is_replay
-        self.stream = None
-
-    def get_state(self):
-        state = super().get_state()
-        state["is_replay"] = self.is_replay
-        return state
-
-    def set_state(self, state):
-        self.is_replay = state.pop("is_replay")
-        super().set_state(state)
-
-    @classmethod
-    def wrap(self, request):
-        """
-        Wraps an existing :py:class:`mitmproxy.net.http.Request`.
-        """
-        req = HTTPRequest(
-            first_line_format=request.data.first_line_format,
-            method=request.data.method,
-            scheme=request.data.scheme,
-            host=request.data.host,
-            port=request.data.port,
-            path=request.data.path,
-            http_version=request.data.http_version,
-            headers=request.data.headers,
-            content=request.data.content,
-            timestamp_start=request.data.timestamp_start,
-            timestamp_end=request.data.timestamp_end,
-        )
-        return req
-
-    def __hash__(self):
-        return id(self)
-
-
-class HTTPResponse(http.Response):
-
-    """
-    A mitmproxy HTTP response.
-    """
-    # This is a very thin wrapper on top of :py:class:`mitmproxy.net.http.Response` and
-    # may be removed in the future.
-
-    def __init__(
-            self,
-            http_version,
-            status_code,
-            reason,
-            headers,
-            content,
-            timestamp_start=None,
-            timestamp_end=None,
-            is_replay=False
-    ):
-        http.Response.__init__(
-            self,
-            http_version,
-            status_code,
-            reason,
-            headers,
-            content,
-            timestamp_start=timestamp_start,
-            timestamp_end=timestamp_end,
-        )
-
-        # Is this request replayed?
-        self.is_replay = is_replay
-        self.stream = None
-
-    @classmethod
-    def wrap(self, response):
-        """
-        Wraps an existing :py:class:`mitmproxy.net.http.Response`.
-        """
-        resp = HTTPResponse(
-            http_version=response.data.http_version,
-            status_code=response.data.status_code,
-            reason=response.data.reason,
-            headers=response.data.headers,
-            content=response.data.content,
-            timestamp_start=response.data.timestamp_start,
-            timestamp_end=response.data.timestamp_end,
-        )
-        return resp
+HTTPRequest = http.Request
+HTTPResponse = http.Response
 
 
 class HTTPFlow(flow.Flow):
-
     """
     An HTTPFlow is a collection of objects representing a single HTTP
     transaction.
     """
+    request: HTTPRequest
+    response: Optional[HTTPResponse] = None
+    error: Optional[flow.Error] = None
+    """
+    Note that it's possible for a Flow to have both a response and an error
+    object. This might happen, for instance, when a response was received
+    from the server, but there was an error sending it back to the client.
+    """
+    server_conn: connections.ServerConnection
+    client_conn: connections.ClientConnection
+    intercepted: bool = False
+    """ Is this flow currently being intercepted? """
+    mode: str
+    """ What mode was the proxy layer in when receiving this request? """
 
     def __init__(self, client_conn, server_conn, live=None, mode="regular"):
         super().__init__("http", client_conn, server_conn, live)
-
-        self.request = None  # type: HTTPRequest
-        """ :py:class:`HTTPRequest` object """
-        self.response = None  # type: HTTPResponse
-        """ :py:class:`HTTPResponse` object """
-        self.error = None  # type: flow.Error
-        """ :py:class:`Error` object
-
-        Note that it's possible for a Flow to have both a response and an error
-        object. This might happen, for instance, when a response was received
-        from the server, but there was an error sending it back to the client.
-        """
-        self.server_conn = server_conn  # type: connections.ServerConnection
-        """ :py:class:`ServerConnection` object """
-        self.client_conn = client_conn  # type: connections.ClientConnection
-        """:py:class:`ClientConnection` object """
-        self.intercepted = False  # type: bool
-        """ Is this flow currently being intercepted? """
         self.mode = mode
-        """ What mode was the proxy layer in when receiving this request? """
 
     _stateobject_attributes = flow.Flow._stateobject_attributes.copy()
     # mypy doesn't support update with kwargs
@@ -180,6 +50,10 @@ class HTTPFlow(flow.Flow):
         s += ">"
         return s.format(flow=self)
 
+    @property
+    def timestamp_start(self) -> float:
+        return self.request.timestamp_start
+
     def copy(self):
         f = super().copy()
         if self.request:
@@ -188,27 +62,13 @@ class HTTPFlow(flow.Flow):
             f.response = self.response.copy()
         return f
 
-    def replace(self, pattern, repl, *args, **kwargs):
-        """
-            Replaces a regular expression pattern with repl in both request and
-            response of the flow. Encoded content will be decoded before
-            replacement, and re-encoded afterwards.
-
-            Returns the number of replacements made.
-        """
-        c = self.request.replace(pattern, repl, *args, **kwargs)
-        if self.response:
-            c += self.response.replace(pattern, repl, *args, **kwargs)
-        return c
-
 
 def make_error_response(
         status_code: int,
-        message: str="",
-        headers: Optional[http.Headers]=None,
+        message: str = "",
+        headers: Optional[http.Headers] = None,
 ) -> HTTPResponse:
-    reason = http.status_codes.RESPONSES.get(status_code, "Unknown")
-    body = """
+    body: bytes = """
         <html>
             <head>
                 <title>{status_code} {reason}</title>
@@ -220,7 +80,7 @@ def make_error_response(
         </html>
     """.strip().format(
         status_code=status_code,
-        reason=reason,
+        reason=http.status_codes.RESPONSES.get(status_code, "Unknown"),
         message=html.escape(message),
     ).encode("utf8", "replace")
 
@@ -232,19 +92,23 @@ def make_error_response(
             Content_Type="text/html"
         )
 
-    return HTTPResponse(
-        b"HTTP/1.1",
-        status_code,
-        reason,
-        headers,
-        body,
-    )
+    return HTTPResponse.make(status_code, body, headers)
 
 
-def make_connect_request(address):
+def make_connect_request(address: Tuple[str, int]) -> HTTPRequest:
     return HTTPRequest(
-        "authority", b"CONNECT", None, address[0], address[1], None, b"HTTP/1.1",
-        http.Headers(), b""
+        host=address[0],
+        port=address[1],
+        method=b"CONNECT",
+        scheme=b"",
+        authority=f"{address[0]}:{address[1]}".encode(),
+        path=b"",
+        http_version=b"HTTP/1.1",
+        headers=http.Headers(),
+        content=b"",
+        trailers=None,
+        timestamp_start=time.time(),
+        timestamp_end=time.time(),
     )
 
 
@@ -257,9 +121,11 @@ def make_connect_response(http_version):
         b"Connection established",
         http.Headers(),
         b"",
+        None,
+        time.time(),
+        time.time(),
     )
 
 
-expect_continue_response = HTTPResponse(
-    b"HTTP/1.1", 100, b"Continue", http.Headers(), b""
-)
+def make_expect_continue_response():
+    return HTTPResponse.make(100)

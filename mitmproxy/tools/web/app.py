@@ -1,23 +1,26 @@
+import asyncio
 import hashlib
 import json
 import logging
 import os.path
 import re
 from io import BytesIO
+from typing import ClassVar, Optional
 
-import mitmproxy.addons.view
-import mitmproxy.flow
 import tornado.escape
 import tornado.web
 import tornado.websocket
+
+import mitmproxy.flow
+import mitmproxy.tools.web.master  # noqa
 from mitmproxy import contentviews
 from mitmproxy import exceptions
 from mitmproxy import flowfilter
 from mitmproxy import http
 from mitmproxy import io
 from mitmproxy import log
+from mitmproxy import optmanager
 from mitmproxy import version
-import mitmproxy.tools.web.master # noqa
 
 
 def flow_to_json(flow: mitmproxy.flow.Flow) -> dict:
@@ -30,6 +33,7 @@ def flow_to_json(flow: mitmproxy.flow.Flow) -> dict:
     f = {
         "id": flow.id,
         "intercepted": flow.intercepted,
+        "is_replay": flow.is_replay,
         "client_conn": flow.client_conn.get_state(),
         "server_conn": flow.server_conn.get_state(),
         "type": flow.type,
@@ -42,10 +46,14 @@ def flow_to_json(flow: mitmproxy.flow.Flow) -> dict:
             continue
         f[conn]["alpn_proto_negotiated"] = \
             f[conn]["alpn_proto_negotiated"].decode(errors="backslashreplace")
+    # There are some bytes in here as well, let's skip it until we have them in the UI.
+    f["client_conn"].pop("tls_extensions", None)
     if flow.error:
         f["error"] = flow.error.get_state()
 
     if isinstance(flow, http.HTTPFlow):
+        content_length: Optional[int]
+        content_hash: Optional[str]
         if flow.request:
             if flow.request.raw_content:
                 content_length = len(flow.request.raw_content)
@@ -65,7 +73,7 @@ def flow_to_json(flow: mitmproxy.flow.Flow) -> dict:
                 "contentHash": content_hash,
                 "timestamp_start": flow.request.timestamp_start,
                 "timestamp_end": flow.request.timestamp_end,
-                "is_replay": flow.request.is_replay,
+                "is_replay": flow.is_replay == "request",  # TODO: remove, use flow.is_replay instead.
                 "pretty_host": flow.request.pretty_host,
             }
         if flow.response:
@@ -84,8 +92,11 @@ def flow_to_json(flow: mitmproxy.flow.Flow) -> dict:
                 "contentHash": content_hash,
                 "timestamp_start": flow.response.timestamp_start,
                 "timestamp_end": flow.response.timestamp_end,
-                "is_replay": flow.response.is_replay,
+                "is_replay": flow.is_replay == "response",  # TODO: remove, use flow.is_replay instead.
             }
+            if flow.response.data.trailers:
+                f["response"]["trailers"] = tuple(flow.response.data.trailers.items(True))
+
     f.get("server_conn", {}).pop("cert", None)
     f.get("client_conn", {}).pop("mitmcert", None)
 
@@ -105,6 +116,8 @@ class APIError(tornado.web.HTTPError):
 
 
 class RequestHandler(tornado.web.RequestHandler):
+    application: "Application"
+
     def write(self, chunk):
         # Writing arrays on the top level is ok nowadays.
         # http://flask.pocoo.org/docs/0.11/security/#json-security
@@ -147,7 +160,7 @@ class RequestHandler(tornado.web.RequestHandler):
             return self.request.body
 
     @property
-    def view(self) -> mitmproxy.addons.view.View:
+    def view(self) -> "mitmproxy.addons.view.View":
         return self.application.master.view
 
     @property
@@ -187,7 +200,7 @@ class FilterHelp(RequestHandler):
 
 class WebSocketEventBroadcaster(tornado.websocket.WebSocketHandler):
     # raise an error if inherited class doesn't specify its own instance.
-    connections = None  # type: set
+    connections: ClassVar[set]
 
     def open(self):
         self.connections.add(self)
@@ -207,7 +220,7 @@ class WebSocketEventBroadcaster(tornado.websocket.WebSocketHandler):
 
 
 class ClientConnection(WebSocketEventBroadcaster):
-    connections = set()  # type: set
+    connections: ClassVar[set] = set()
 
 
 class Flows(RequestHandler):
@@ -232,7 +245,7 @@ class DumpFlows(RequestHandler):
         self.view.clear()
         bio = BytesIO(self.filecontents)
         for i in io.FlowReader(bio).stream():
-            self.master.load_flow(i)
+            asyncio.ensure_future(self.master.load_flow(i))
         bio.close()
 
 
@@ -292,6 +305,10 @@ class FlowHandler(RequestHandler):
                             request.headers.clear()
                             for header in v:
                                 request.headers.add(*header)
+                        elif k == "trailers":
+                            request.trailers.clear()
+                            for trailer in v:
+                                request.trailers.add(*trailer)
                         elif k == "content":
                             request.text = v
                         else:
@@ -308,6 +325,10 @@ class FlowHandler(RequestHandler):
                             response.headers.clear()
                             for header in v:
                                 response.headers.add(*header)
+                        elif k == "trailers":
+                            response.trailers.clear()
+                            for trailer in v:
+                                response.trailers.add(*trailer)
                         elif k == "content":
                             response.text = v
                         else:
@@ -341,7 +362,7 @@ class ReplayFlow(RequestHandler):
         self.view.update([self.flow])
 
         try:
-            self.master.replay_request(self.flow)
+            self.master.commands.call("replay.client", [self.flow])
         except exceptions.ReplayException as e:
             raise APIError(400, str(e))
 
@@ -367,7 +388,7 @@ class FlowContent(RequestHandler):
         original_cd = message.headers.get("Content-Disposition", None)
         filename = None
         if original_cd:
-            filename = re.search('filename=([-\w" .()]+)', original_cd)
+            filename = re.search(r'filename=([-\w" .()]+)', original_cd)
             if filename:
                 filename = filename.group(1)
         if not filename:
@@ -387,7 +408,7 @@ class FlowContentView(RequestHandler):
         message = getattr(self.flow, message)
 
         description, lines, error = contentviews.get_message_content_view(
-            content_view.replace('_', ' '), message
+            content_view.replace('_', ' '), message, self.flow
         )
         #        if error:
         #           add event log
@@ -408,6 +429,7 @@ class Settings(RequestHandler):
         self.write(dict(
             version=version.VERSION,
             mode=str(self.master.options.mode),
+            intercept_active=self.master.options.intercept_active,
             intercept=self.master.options.intercept,
             showhost=self.master.options.showhost,
             upstream_cert=self.master.options.upstream_cert,
@@ -427,43 +449,54 @@ class Settings(RequestHandler):
 
     def put(self):
         update = self.json
-        option_whitelist = {
-            "intercept", "showhost", "upstream_cert",
+        allowed_options = {
+            "intercept", "showhost", "upstream_cert", "ssl_insecure",
             "rawtcp", "http2", "websocket", "anticache", "anticomp",
             "stickycookie", "stickyauth", "stream_large_bodies"
         }
         for k in update:
-            if k not in option_whitelist:
+            if k not in allowed_options:
                 raise APIError(400, "Unknown setting {}".format(k))
         self.master.options.update(**update)
 
 
+class Options(RequestHandler):
+    def get(self):
+        self.write(optmanager.dump_dicts(self.master.options))
+
+    def put(self):
+        update = self.json
+        try:
+            self.master.options.update(**update)
+        except Exception as err:
+            raise APIError(400, "{}".format(err))
+
+
+class SaveOptions(RequestHandler):
+    def post(self):
+        # try:
+        #     optmanager.save(self.master.options, CONFIG_PATH, True)
+        # except Exception as err:
+        #     raise APIError(400, "{}".format(err))
+        pass
+
+
+class DnsRebind(RequestHandler):
+    def get(self):
+        raise tornado.web.HTTPError(
+            403,
+            reason="To protect against DNS rebinding, mitmweb can only be accessed by IP at the moment. "
+                   "(https://github.com/mitmproxy/mitmproxy/issues/3234)"
+        )
+
+
 class Application(tornado.web.Application):
-    def __init__(self, master, debug):
+    master: "mitmproxy.tools.web.master.WebMaster"
+
+    def __init__(self, master: "mitmproxy.tools.web.master.WebMaster", debug: bool) -> None:
         self.master = master
-        handlers = [
-            (r"/", IndexHandler),
-            (r"/filter-help", FilterHelp),
-            (r"/updates", ClientConnection),
-            (r"/events", Events),
-            (r"/flows", Flows),
-            (r"/flows/dump", DumpFlows),
-            (r"/flows/resume", ResumeFlows),
-            (r"/flows/kill", KillFlows),
-            (r"/flows/(?P<flow_id>[0-9a-f\-]+)", FlowHandler),
-            (r"/flows/(?P<flow_id>[0-9a-f\-]+)/resume", ResumeFlow),
-            (r"/flows/(?P<flow_id>[0-9a-f\-]+)/kill", KillFlow),
-            (r"/flows/(?P<flow_id>[0-9a-f\-]+)/duplicate", DuplicateFlow),
-            (r"/flows/(?P<flow_id>[0-9a-f\-]+)/replay", ReplayFlow),
-            (r"/flows/(?P<flow_id>[0-9a-f\-]+)/revert", RevertFlow),
-            (r"/flows/(?P<flow_id>[0-9a-f\-]+)/(?P<message>request|response)/content", FlowContent),
-            (
-                r"/flows/(?P<flow_id>[0-9a-f\-]+)/(?P<message>request|response)/content/(?P<content_view>[0-9a-zA-Z\-\_]+)",
-                FlowContentView),
-            (r"/settings", Settings),
-            (r"/clear", ClearAll),
-        ]
-        settings = dict(
+        super().__init__(
+            default_host="dns-rebind-protection",
             template_path=os.path.join(os.path.dirname(__file__), "templates"),
             static_path=os.path.join(os.path.dirname(__file__), "static"),
             xsrf_cookies=True,
@@ -471,4 +504,33 @@ class Application(tornado.web.Application):
             debug=debug,
             autoreload=False,
         )
-        super().__init__(handlers, **settings)
+
+        self.add_handlers("dns-rebind-protection", [(r"/.*", DnsRebind)])
+        self.add_handlers(
+            # make mitmweb accessible by IP only to prevent DNS rebinding.
+            r'^(localhost|[0-9.]+|\[[0-9a-fA-F:]+\])$',
+            [
+                (r"/", IndexHandler),
+                (r"/filter-help(?:\.json)?", FilterHelp),
+                (r"/updates", ClientConnection),
+                (r"/events(?:\.json)?", Events),
+                (r"/flows(?:\.json)?", Flows),
+                (r"/flows/dump", DumpFlows),
+                (r"/flows/resume", ResumeFlows),
+                (r"/flows/kill", KillFlows),
+                (r"/flows/(?P<flow_id>[0-9a-f\-]+)", FlowHandler),
+                (r"/flows/(?P<flow_id>[0-9a-f\-]+)/resume", ResumeFlow),
+                (r"/flows/(?P<flow_id>[0-9a-f\-]+)/kill", KillFlow),
+                (r"/flows/(?P<flow_id>[0-9a-f\-]+)/duplicate", DuplicateFlow),
+                (r"/flows/(?P<flow_id>[0-9a-f\-]+)/replay", ReplayFlow),
+                (r"/flows/(?P<flow_id>[0-9a-f\-]+)/revert", RevertFlow),
+                (r"/flows/(?P<flow_id>[0-9a-f\-]+)/(?P<message>request|response)/content.data", FlowContent),
+                (
+                    r"/flows/(?P<flow_id>[0-9a-f\-]+)/(?P<message>request|response)/content/(?P<content_view>[0-9a-zA-Z\-\_]+)(?:\.json)?",
+                    FlowContentView),
+                (r"/settings(?:\.json)?", Settings),
+                (r"/clear", ClearAll),
+                (r"/options(?:\.json)?", Options),
+                (r"/options/save", SaveOptions)
+            ]
+        )

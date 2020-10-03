@@ -1,3 +1,4 @@
+import types
 import typing
 import traceback
 import contextlib
@@ -6,6 +7,7 @@ import sys
 from mitmproxy import exceptions
 from mitmproxy import eventsequence
 from mitmproxy import controller
+from mitmproxy import flow
 from . import ctx
 import pprint
 
@@ -34,33 +36,15 @@ def cut_traceback(tb, func_name):
     return tb or tb_orig
 
 
-class StreamLog:
-    """
-        A class for redirecting output using contextlib.
-    """
-    def __init__(self, log):
-        self.log = log
-
-    def write(self, buf):
-        if buf.strip():
-            self.log(buf)
-
-    def flush(self):  # pragma: no cover
-        # Click uses flush sometimes, so we dummy it up
-        pass
-
-
 @contextlib.contextmanager
 def safecall():
-    stdout_replacement = StreamLog(ctx.log.warn)
     try:
-        with contextlib.redirect_stdout(stdout_replacement):
-            yield
+        yield
     except (exceptions.AddonHalt, exceptions.OptionsError):
         raise
-    except Exception as e:
+    except Exception:
         etype, value, tb = sys.exc_info()
-        tb = cut_traceback(tb, "invoke_addon").tb_next
+        tb = cut_traceback(tb, "invoke_addon")
         ctx.log.error(
             "Addon error: %s" % "".join(
                 traceback.format_exception(etype, value, tb)
@@ -83,8 +67,26 @@ class Loader:
         help: str,
         choices: typing.Optional[typing.Sequence[str]] = None
     ) -> None:
+        """
+            Add an option to mitmproxy.
+
+            Help should be a single paragraph with no linebreaks - it will be
+            reflowed by tools. Information on the data type should be omitted -
+            it will be generated and added by tools as needed.
+        """
         if name in self.master.options:
-            ctx.log.warn("Over-riding existing option %s" % name)
+            existing = self.master.options._options[name]
+            same_signature = (
+                existing.name == name and
+                existing.typespec == typespec and
+                existing.default == default and
+                existing.help == help and
+                existing.choices == choices
+            )
+            if same_signature:
+                return
+            else:
+                ctx.log.warn("Over-riding existing option %s" % name)
         self.master.options.add_option(
             name,
             typespec,
@@ -121,8 +123,10 @@ class AddonManager:
         """
             Remove all addons.
         """
-        for i in self.chain:
-            self.remove(i)
+        for a in self.chain:
+            self.invoke_addon(a, "done")
+        self.lookup = {}
+        self.chain = []
 
     def get(self, name):
         """
@@ -155,6 +159,7 @@ class AddonManager:
             self.lookup[name] = a
         for a in traverse([addon]):
             self.master.commands.collect_commands(a)
+        self.master.options.process_deferred()
         return addon
 
     def add(self, *addons):
@@ -162,9 +167,8 @@ class AddonManager:
             Add addons to the end of the chain, and run their load event.
             If any addon has sub-addons, they are registered.
         """
-        with self.master.handlecontext():
-            for i in addons:
-                self.chain.append(self.register(i))
+        for i in addons:
+            self.chain.append(self.register(i))
 
     def remove(self, addon):
         """
@@ -180,8 +184,7 @@ class AddonManager:
                 raise exceptions.AddonManagerError("No such addon: %s" % n)
             self.chain = [i for i in self.chain if i is not a]
             del self.lookup[_get_name(a)]
-        with self.master.handlecontext():
-            self.invoke_addon(a, "done")
+        self.invoke_addon(addon, "done")
 
     def __len__(self):
         return len(self.chain)
@@ -189,7 +192,11 @@ class AddonManager:
     def __str__(self):
         return pprint.pformat([str(i) for i in self.chain])
 
-    def handle_lifecycle(self, name, message):
+    def __contains__(self, item):
+        name = _get_name(item)
+        return name in self.lookup
+
+    async def handle_lifecycle(self, name, message):
         """
             Handle a lifecycle event.
         """
@@ -206,7 +213,7 @@ class AddonManager:
 
         self.trigger(name, message)
 
-        if message.reply.state != "taken":
+        if message.reply.state == "start":
             message.reply.take()
             if not message.reply.has_message:
                 message.reply.ack()
@@ -215,30 +222,38 @@ class AddonManager:
             if isinstance(message.reply, controller.DummyReply):
                 message.reply.mark_reset()
 
+        if isinstance(message, flow.Flow):
+            self.trigger("update", [message])
+
     def invoke_addon(self, addon, name, *args, **kwargs):
         """
-            Invoke an event on an addon and all its children. This method must
-            run within an established handler context.
+            Invoke an event on an addon and all its children.
         """
         if name not in eventsequence.Events:
-            name = "event_" + name
+            raise exceptions.AddonManagerError("Unknown event: %s" % name)
         for a in traverse([addon]):
             func = getattr(a, name, None)
             if func:
-                if not callable(func):
+                if callable(func):
+                    func(*args, **kwargs)
+                elif isinstance(func, types.ModuleType):
+                    # we gracefully exclude module imports with the same name as hooks.
+                    # For example, a user may have "from mitmproxy import log" in an addon,
+                    # which has the same name as the "log" hook. In this particular case,
+                    # we end up in an error loop because we "log" this error.
+                    pass
+                else:
                     raise exceptions.AddonManagerError(
-                        "Addon handler %s not callable" % name
+                        "Addon handler {} ({}) not callable".format(name, a)
                     )
-                func(*args, **kwargs)
 
     def trigger(self, name, *args, **kwargs):
         """
-            Establish a handler context and trigger an event across all addons
+            Trigger an event across all addons.
         """
-        with self.master.handlecontext():
-            for i in self.chain:
-                try:
-                    with safecall():
-                        self.invoke_addon(i, name, *args, **kwargs)
-                except exceptions.AddonHalt:
-                    return
+        for i in self.chain:
+            try:
+                with safecall():
+                    self.invoke_addon(i, name, *args, **kwargs)
+            except exceptions.AddonHalt:
+                return

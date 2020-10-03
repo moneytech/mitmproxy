@@ -27,13 +27,14 @@ export default class WebsocketBackend {
         this.fetchData("settings")
         this.fetchData("flows")
         this.fetchData("events")
+        this.fetchData("options")
         this.store.dispatch(connectionActions.startFetching())
     }
 
     fetchData(resource) {
         let queue = []
         this.activeFetches[resource] = queue
-        fetchApi(`/${resource}`)
+        fetchApi(`./${resource}`)
             .then(res => res.json())
             .then(json => {
                 // Make sure that we are not superseded yet by the server sending a RESET.

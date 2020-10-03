@@ -3,19 +3,17 @@ import logging
 import os
 import sys
 import threading
-
-from mitmproxy.net import tcp
+from mitmproxy.net import tcp, tls
 from mitmproxy import certs as mcerts
 from mitmproxy.net import websockets
 from mitmproxy import version
-
 import urllib
 from mitmproxy import exceptions
-
 from pathod import language
 from pathod import utils
 from pathod import log
 from pathod import protocols
+import typing  # noqa
 
 
 DEFAULT_CERT_DOMAIN = b"pathod.net"
@@ -23,6 +21,7 @@ CONFDIR = "~/.mitmproxy"
 CERTSTORE_BASENAME = "mitmproxy"
 CA_CERT_NAME = "mitmproxy-ca.pem"
 DEFAULT_CRAFT_ANCHOR = "/p/"
+KEY_SIZE = 2048
 
 logger = logging.getLogger('pathod')
 
@@ -39,8 +38,8 @@ class SSLOptions:
         sans=(),
         not_after_connect=None,
         request_client_cert=False,
-        ssl_version=tcp.SSL_DEFAULT_METHOD,
-        ssl_options=tcp.SSL_DEFAULT_OPTIONS,
+        ssl_version=tls.DEFAULT_METHOD,
+        ssl_options=tls.DEFAULT_OPTIONS,
         ciphers=None,
         certs=None,
         alpn_select=b'h2',
@@ -56,7 +55,8 @@ class SSLOptions:
         self.alpn_select = alpn_select
         self.certstore = mcerts.CertStore.from_store(
             os.path.expanduser(confdir),
-            CERTSTORE_BASENAME
+            CERTSTORE_BASENAME,
+            KEY_SIZE
         )
         for i in certs or []:
             self.certstore.add_cert_file(*i)
@@ -71,7 +71,7 @@ class SSLOptions:
 
 class PathodHandler(tcp.BaseHandler):
     wbufsize = 0
-    sni = None
+    sni: typing.Union[str, None, bool] = None
 
     def __init__(
         self,
@@ -172,7 +172,7 @@ class PathodHandler(tcp.BaseHandler):
                 ),
                 cipher=None,
             )
-            if self.ssl_established:
+            if self.tls_established:
                 retlog["cipher"] = self.get_current_cipher()
 
             m = utils.MemBool()
@@ -246,7 +246,7 @@ class PathodHandler(tcp.BaseHandler):
         if self.server.ssl:
             try:
                 cert, key, _ = self.server.ssloptions.get_cert(None)
-                self.convert_to_ssl(
+                self.convert_to_tls(
                     cert,
                     key,
                     handle_sni=self.handle_sni,

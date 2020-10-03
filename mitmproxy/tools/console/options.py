@@ -6,7 +6,7 @@ from typing import Optional, Sequence
 
 from mitmproxy import exceptions
 from mitmproxy import optmanager
-from mitmproxy.tools.console import common
+from mitmproxy.tools.console import layoutwidget
 from mitmproxy.tools.console import signals
 from mitmproxy.tools.console import overlay
 
@@ -18,28 +18,6 @@ def can_edit_inplace(opt):
         return False
     if opt.typespec in [str, int, Optional[str], Optional[int]]:
         return True
-
-
-footer = [
-    ('heading_key', "enter"), ":edit ",
-    ('heading_key', "?"), ":help ",
-]
-
-
-def _mkhelp():
-    text = []
-    keys = [
-        ("enter", "edit option"),
-        ("D", "reset all to defaults"),
-        ("d", "reset this option to default"),
-        ("l", "load options from file"),
-        ("w", "save options to file"),
-    ]
-    text.extend(common.format_keyvals(keys, key="key", val="text", indent=4))
-    return text
-
-
-help_context = _mkhelp()
 
 
 def fcol(s, width, attr):
@@ -128,6 +106,8 @@ class OptionListWalker(urwid.ListWalker):
         self.master.options.changed.connect(self.sig_mod)
 
     def sig_mod(self, *args, **kwargs):
+        self.opts = sorted(self.master.options.keys())
+        self.maxlen = max(len(i) for i in self.opts)
         self._modified()
         self.set_focus(self.index)
 
@@ -139,6 +119,7 @@ class OptionListWalker(urwid.ListWalker):
     def stop_editing(self):
         self.editing = False
         self.focus_obj = self._get(self.index, False)
+        self.set_focus(self.index)
         self._modified()
 
     def get_edit_text(self):
@@ -187,50 +168,29 @@ class OptionsList(urwid.ListBox):
         except exceptions.OptionsError as e:
             signals.status_message.send(message=str(e))
 
-    def load_config(self, path):
-        try:
-            optmanager.load_paths(self.master.options, path)
-        except exceptions.OptionsError as e:
-            signals.status_message.send(message=str(e))
-
     def keypress(self, size, key):
         if self.walker.editing:
             if key == "enter":
                 foc, idx = self.get_focus()
                 v = self.walker.get_edit_text()
                 try:
-                    d = self.master.options.parse_setval(foc.opt.name, v)
+                    d = self.master.options.parse_setval(foc.opt, v)
                     self.master.options.update(**{foc.opt.name: d})
                 except exceptions.OptionsError as v:
                     signals.status_message.send(message=str(v))
                 self.walker.stop_editing()
+                return None
             elif key == "esc":
                 self.walker.stop_editing()
+                return None
         else:
-            if key == "d":
-                foc, idx = self.get_focus()
-                setattr(
-                    self.master.options,
-                    foc.opt.name,
-                    self.master.options.default(foc.opt.name)
-                )
-            elif key == "g":
+            if key == "m_start":
                 self.set_focus(0)
                 self.walker._modified()
-            elif key == "G":
+            elif key == "m_end":
                 self.set_focus(len(self.walker.opts) - 1)
                 self.walker._modified()
-            elif key == "l":
-                signals.status_prompt_path.send(
-                    prompt = "Load config from",
-                    callback = self.load_config
-                )
-            elif key == "w":
-                signals.status_prompt_path.send(
-                    prompt = "Save config to",
-                    callback = self.save_config
-                )
-            elif key == "enter":
+            elif key == "m_select":
                 foc, idx = self.get_focus()
                 if foc.opt.typespec == bool:
                     self.master.options.toggler(foc.opt.name)()
@@ -242,6 +202,7 @@ class OptionsList(urwid.ListBox):
                 elif foc.opt.choices:
                     self.master.overlay(
                         overlay.Chooser(
+                            self.master,
                             foc.opt.name,
                             foc.opt.choices,
                             foc.opt.current(),
@@ -285,27 +246,31 @@ class OptionHelp(urwid.Frame):
         self.set_body(self.widget(txt))
 
 
-class Options(urwid.Pile):
+class Options(urwid.Pile, layoutwidget.LayoutWidget):
+    title = "Options"
+    keyctx = "options"
+
     def __init__(self, master):
         oh = OptionHelp(master)
+        self.optionslist = OptionsList(master)
         super().__init__(
             [
-                OptionsList(master),
+                self.optionslist,
                 (HELP_HEIGHT, oh),
             ]
         )
         self.master = master
 
+    def current_name(self):
+        foc, idx = self.optionslist.get_focus()
+        return foc.opt.name
+
     def keypress(self, size, key):
-        key = common.shortcuts(key)
-        if key == "tab":
+        if key == "m_next":
             self.focus_position = (
                 self.focus_position + 1
             ) % len(self.widget_list)
             self.widget_list[1].set_active(self.focus_position == 1)
-            key = None
-        elif key == "D":
-            self.master.options.reset()
             key = None
 
         # This is essentially a copypasta from urwid.Pile's keypress handler.

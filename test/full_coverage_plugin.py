@@ -1,6 +1,7 @@
 import os
 import configparser
 import pytest
+import sys
 
 here = os.path.abspath(os.path.dirname(__file__))
 
@@ -30,8 +31,8 @@ def pytest_configure(config):
     global no_full_cov
 
     enable_coverage = (
-        len(config.getoption('file_or_dir')) == 0 and
-        len(config.getoption('full_cov')) > 0 and
+        config.getoption('file_or_dir') and len(config.getoption('file_or_dir')) == 0 and
+        config.getoption('full_cov') and len(config.getoption('full_cov')) > 0 and
         config.pluginmanager.getplugin("_cov") is not None and
         config.pluginmanager.getplugin("_cov").cov_controller is not None and
         config.pluginmanager.getplugin("_cov").cov_controller.cov is not None
@@ -54,14 +55,20 @@ def pytest_runtestloop(session):
         yield
         return
 
-    cov = pytest.config.pluginmanager.getplugin("_cov").cov_controller.cov
+    cov = session.config.pluginmanager.getplugin("_cov").cov_controller.cov
 
     if os.name == 'nt':
         cov.exclude('pragma: windows no cover')
 
+    if sys.platform == 'darwin':
+        cov.exclude('pragma: osx no cover')
+
+    if os.environ.get("OPENSSL") == "old":
+        cov.exclude('pragma: openssl-old no cover')
+
     yield
 
-    coverage_values = dict([(name, 0) for name in pytest.config.option.full_cov])
+    coverage_values = dict([(name, 0) for name in session.config.option.full_cov])
 
     prefix = os.getcwd()
 
@@ -85,7 +92,7 @@ def pytest_runtestloop(session):
         coverage_passed = False
 
 
-def pytest_terminal_summary(terminalreporter, exitstatus):
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
     global enable_coverage
     global coverage_values
     global coverage_passed
@@ -112,7 +119,7 @@ def pytest_terminal_summary(terminalreporter, exitstatus):
             terminalreporter.write(msg, **markup)
     else:
         msg = 'SUCCESS: Full test coverage reached in modules and files:\n'
-        msg += '{}\n\n'.format('\n'.join(pytest.config.option.full_cov))
+        msg += '{}\n\n'.format('\n'.join(config.option.full_cov))
         terminalreporter.write(msg, green=True)
 
     msg = '\nExcluded files:\n'

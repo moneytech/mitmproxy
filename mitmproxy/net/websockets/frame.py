@@ -6,7 +6,7 @@ from mitmproxy.net import tcp
 from mitmproxy.utils import strutils
 from mitmproxy.utils import bits
 from mitmproxy.utils import human
-from mitmproxy.types import bidi
+from mitmproxy.coretypes import bidi
 from .masker import Masker
 
 
@@ -71,7 +71,7 @@ class FrameHeader:
         else:
             self.length_code = length_code
 
-        if mask is DEFAULT and masking_key is DEFAULT:
+        if (mask is DEFAULT and masking_key is DEFAULT) or mask == 0 or mask is False:
             self.mask = False
             self.masking_key = b""
         elif mask is DEFAULT:

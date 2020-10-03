@@ -1,4 +1,4 @@
-// PEG.js filter rules - see http://pegjs.majda.cz/online
+// PEG.js filter rules - see https://pegjs.org/
 
 {
 var flowutils = require("../flow/utils.js");
@@ -72,7 +72,7 @@ function responseCode(code){
 function body(regex){
     regex = new RegExp(regex, "i");
     function bodyFilter(flow){
-        return True;
+        return true;
     }
     bodyFilter.desc = "body filters are not implemented yet, see https://github.com/mitmproxy/mitmweb/issues/10";
     return bodyFilter;
@@ -80,7 +80,7 @@ function body(regex){
 function requestBody(regex){
     regex = new RegExp(regex, "i");
     function requestBodyFilter(flow){
-        return True;
+        return true;
     }
     requestBodyFilter.desc = "body filters are not implemented yet, see https://github.com/mitmproxy/mitmweb/issues/10";
     return requestBodyFilter;
@@ -88,7 +88,7 @@ function requestBody(regex){
 function responseBody(regex){
     regex = new RegExp(regex, "i");
     function responseBodyFilter(flow){
-        return True;
+        return true;
     }
     responseBodyFilter.desc = "body filters are not implemented yet, see https://github.com/mitmproxy/mitmweb/issues/10";
     return responseBodyFilter;
@@ -253,7 +253,7 @@ BindingExpr
   / Expr
 
 /* All the filters except "~s" and "~src" are arranged in the ascending order as
-   given in the docs(http://docs.mitmproxy.org/en/latest/features/filters.html).
+   given in the docs(https://mitmproxy.org/docs/latest/concepts-filters/).
    "~s" and "~src" are so arranged as "~s" caused problems in the evaluation of
    "~src". */
 

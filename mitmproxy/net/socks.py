@@ -3,7 +3,7 @@ import array
 import ipaddress
 
 from mitmproxy.net import check
-from mitmproxy.types import bidi
+from mitmproxy.coretypes import bidi
 
 
 class SocksError(Exception):
@@ -82,12 +82,12 @@ class ClientGreeting:
         client_greeting = cls(ver, [])
         if fail_early:
             client_greeting.assert_socks5()
-        client_greeting.methods.fromstring(f.safe_read(nmethods))
+        client_greeting.methods.frombytes(f.safe_read(nmethods))
         return client_greeting
 
     def to_file(self, f):
         f.write(struct.pack("!BB", self.ver, len(self.methods)))
-        f.write(self.methods.tostring())
+        f.write(self.methods.tobytes())
 
 
 class ServerGreeting:

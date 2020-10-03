@@ -7,6 +7,7 @@ from mitmproxy import flowfilter
 from mitmproxy import exceptions
 from mitmproxy import io
 from mitmproxy.test import taddons
+from mitmproxy.tools.console import consoleaddons
 
 
 def tft(*, method="get", start=0):
@@ -27,20 +28,20 @@ def test_order_refresh():
 
     tf = tflow.tflow(resp=True)
     with taddons.context() as tctx:
-        tctx.configure(v, console_order="time")
+        tctx.configure(v, view_order="time")
         v.add([tf])
-        tf.request.timestamp_start = 1
+        tf.request.timestamp_start = 10
         assert not sargs
         v.update([tf])
         assert sargs
 
 
-def test_order_generators():
+def test_order_generators_http():
     v = view.View()
     tf = tflow.tflow(resp=True)
 
     rs = view.OrderRequestStart(v)
-    assert rs.generate(tf) == 0
+    assert rs.generate(tf) == 946681200
 
     rm = view.OrderRequestMethod(v)
     assert rm.generate(tf) == tf.request.method
@@ -50,6 +51,23 @@ def test_order_generators():
 
     sz = view.OrderKeySize(v)
     assert sz.generate(tf) == len(tf.request.raw_content) + len(tf.response.raw_content)
+
+
+def test_order_generators_tcp():
+    v = view.View()
+    tf = tflow.ttcpflow()
+
+    rs = view.OrderRequestStart(v)
+    assert rs.generate(tf) == 946681200
+
+    rm = view.OrderRequestMethod(v)
+    assert rm.generate(tf) == "TCP"
+
+    ru = view.OrderRequestURL(v)
+    assert ru.generate(tf) == "address:22"
+
+    sz = view.OrderKeySize(v)
+    assert sz.generate(tf) == sum(len(m.content) for m in tf.messages)
 
 
 def test_simple():
@@ -104,15 +122,29 @@ def test_simple():
     assert len(v._store) == 0
 
 
+def test_simple_tcp():
+    v = view.View()
+    f = tflow.ttcpflow()
+    assert v.store_count() == 0
+    v.tcp_start(f)
+    assert list(v) == [f]
+
+    # These all just call update
+    v.tcp_start(f)
+    v.tcp_message(f)
+    v.tcp_error(f)
+    v.tcp_end(f)
+    assert list(v) == [f]
+
+
 def test_filter():
     v = view.View()
-    f = flowfilter.parse("~m get")
     v.request(tft(method="get"))
     v.request(tft(method="put"))
     v.request(tft(method="get"))
     v.request(tft(method="put"))
     assert(len(v)) == 4
-    v.set_filter(f)
+    v.set_filter_cmd("~m get")
     assert [i.request.method for i in v] == ["GET", "GET"]
     assert len(v._store) == 4
     v.set_filter(None)
@@ -123,6 +155,9 @@ def test_filter():
     v.toggle_marked()
     assert len(v) == 4
 
+    with pytest.raises(exceptions.CommandError):
+        v.set_filter_cmd("~notafilter regex")
+
     v[1].marked = True
     v.toggle_marked()
     assert len(v) == 1
@@ -132,9 +167,10 @@ def test_filter():
 
 
 def tdump(path, flows):
-    w = io.FlowWriter(open(path, "wb"))
-    for i in flows:
-        w.add(i)
+    with open(path, "wb") as f:
+        w = io.FlowWriter(f)
+        for i in flows:
+            w.add(i)
 
 
 def test_create():
@@ -145,15 +181,20 @@ def test_create():
         assert v[0].request.url == "http://foo.com/"
         v.create("get", "http://foo.com")
         assert len(v) == 2
+        with pytest.raises(exceptions.CommandError, match="Invalid URL"):
+            v.create("get", "http://foo.com\\")
+        with pytest.raises(exceptions.CommandError, match="Invalid URL"):
+            v.create("get", "http://")
 
 
 def test_orders():
     v = view.View()
-    with taddons.context():
+    with taddons.context(v):
         assert v.order_options()
 
 
-def test_load(tmpdir):
+@pytest.mark.asyncio
+async def test_load(tmpdir):
     path = str(tmpdir.join("path"))
     v = view.View()
     with taddons.context() as tctx:
@@ -169,6 +210,14 @@ def test_load(tmpdir):
         assert len(v) == 2
         v.load_file(path)
         assert len(v) == 4
+        try:
+            v.load_file("nonexistent_file_path")
+        except IOError:
+            assert False
+        with open(path, "wb") as f:
+            f.write(b"invalidflows")
+        v.load_file(path)
+        assert await tctx.master.await_log("Invalid data format.")
 
 
 def test_resolve():
@@ -218,9 +267,10 @@ def test_resolve():
             tctx.command(v.resolve, "~")
 
 
-def test_go():
+def test_movement():
     v = view.View()
     with taddons.context():
+        v.go(0)
         v.add([
             tflow.tflow(),
             tflow.tflow(),
@@ -240,6 +290,11 @@ def test_go():
         v.go(-999)
         assert v.focus.index == 0
 
+        v.focus_next()
+        assert v.focus.index == 1
+        v.focus_prev()
+        assert v.focus.index == 0
+
 
 def test_duplicate():
     v = view.View()
@@ -255,25 +310,53 @@ def test_duplicate():
         assert v.focus.index == 2
 
 
+def test_remove():
+    v = view.View()
+    with taddons.context():
+        f = [tflow.tflow(), tflow.tflow()]
+        v.add(f)
+        assert len(v) == 2
+        v.remove(f)
+        assert len(v) == 0
+
+
+def test_setgetval():
+    v = view.View()
+    with taddons.context():
+        f = tflow.tflow()
+        v.add([f])
+        v.setvalue([f], "key", "value")
+        assert v.getvalue(f, "key", "default") == "value"
+        assert v.getvalue(f, "unknow", "default") == "default"
+
+        v.setvalue_toggle([f], "key")
+        assert v.getvalue(f, "key", "default") == "true"
+        v.setvalue_toggle([f], "key")
+        assert v.getvalue(f, "key", "default") == "false"
+
+
 def test_order():
     v = view.View()
-    with taddons.context() as tctx:
-        v.request(tft(method="get", start=1))
-        v.request(tft(method="put", start=2))
-        v.request(tft(method="get", start=3))
-        v.request(tft(method="put", start=4))
-        assert [i.request.timestamp_start for i in v] == [1, 2, 3, 4]
+    v.request(tft(method="get", start=1))
+    v.request(tft(method="put", start=2))
+    v.request(tft(method="get", start=3))
+    v.request(tft(method="put", start=4))
+    assert [i.request.timestamp_start for i in v] == [1, 2, 3, 4]
 
-        tctx.configure(v, console_order="method")
-        assert [i.request.method for i in v] == ["GET", "GET", "PUT", "PUT"]
-        v.set_reversed(True)
-        assert [i.request.method for i in v] == ["PUT", "PUT", "GET", "GET"]
+    v.set_order("method")
+    assert v.get_order() == "method"
+    assert [i.request.method for i in v] == ["GET", "GET", "PUT", "PUT"]
+    v.set_reversed(True)
+    assert [i.request.method for i in v] == ["PUT", "PUT", "GET", "GET"]
 
-        tctx.configure(v, console_order="time")
-        assert [i.request.timestamp_start for i in v] == [4, 3, 2, 1]
+    v.set_order("time")
+    assert v.get_order() == "time"
+    assert [i.request.timestamp_start for i in v] == [4, 3, 2, 1]
 
-        v.set_reversed(False)
-        assert [i.request.timestamp_start for i in v] == [1, 2, 3, 4]
+    v.set_reversed(False)
+    assert [i.request.timestamp_start for i in v] == [1, 2, 3, 4]
+    with pytest.raises(exceptions.CommandError):
+        v.set_order("not_an_order")
 
 
 def test_reversed():
@@ -388,7 +471,9 @@ def test_signals():
 
 def test_focus_follow():
     v = view.View()
-    with taddons.context() as tctx:
+    with taddons.context(v) as tctx:
+        console_addon = consoleaddons.ConsoleAddon(tctx.master)
+        tctx.configure(console_addon)
         tctx.configure(v, console_focus_follow=True, view_filter="~m get")
 
         v.add([tft(start=5)])
@@ -418,7 +503,7 @@ def test_focus():
     v = view.View()
     v.add([tft()])
     f = view.Focus(v)
-    assert f.index is 0
+    assert f.index == 0
     assert f.flow is v[0]
 
     # Start empty
@@ -503,18 +588,29 @@ def test_settings():
     assert not v.settings.keys()
 
 
+def test_properties():
+    v = view.View()
+    f = tft()
+    v.request(f)
+    assert v.get_length() == 1
+    assert not v.get_marked()
+    v.toggle_marked()
+    assert v.get_length() == 0
+    assert v.get_marked()
+
+
 def test_configure():
     v = view.View()
-    with taddons.context() as tctx:
+    with taddons.context(v) as tctx:
         tctx.configure(v, view_filter="~q")
         with pytest.raises(Exception, match="Invalid interception filter"):
             tctx.configure(v, view_filter="~~")
 
-        tctx.configure(v, console_order="method")
+        tctx.configure(v, view_order="method")
         with pytest.raises(Exception, match="Unknown flow order"):
-            tctx.configure(v, console_order="no")
+            tctx.configure(v, view_order="no")
 
-        tctx.configure(v, console_order_reversed=True)
+        tctx.configure(v, view_order_reversed=True)
 
         tctx.configure(v, console_focus_follow=True)
         assert v.focus_follow

@@ -1,6 +1,5 @@
 import _ from 'lodash'
 import React from 'react'
-import shallowEqual from 'shallowequal'
 
 window._ = _;
 window.React = React;
@@ -58,8 +57,14 @@ export var formatTimeDelta = function (milliseconds) {
 };
 
 
-export var formatTimeStamp = function (seconds) {
-    var ts = (new Date(seconds * 1000)).toISOString();
+export var formatTimeStamp = function (seconds, utc_to_local=true) {
+    var utc = new Date(seconds * 1000);
+    if (utc_to_local) {
+        var local = utc.getTime() - utc.getTimezoneOffset() * 60 * 1000;
+        var ts = new Date(local).toISOString();
+    } else {
+        var ts = utc.toISOString();
+    }
     return ts.replace("T", " ").replace("Z", "");
 };
 
@@ -88,6 +93,11 @@ export function fetchApi(url, options={}) {
         } else {
             url += "&" + xsrf;
         }
+    } else {
+        url += '.json'
+    }
+    if (url.startsWith("/")) {
+        url = "." + url;
     }
 
     return fetch(url, {
@@ -121,12 +131,8 @@ export function getDiff(obj1, obj2) {
     return result
 }
 
-export const pure = renderFn => class extends React.Component {
+export const pure = renderFn => class extends React.PureComponent {
     static displayName = renderFn.name
-
-    shouldComponentUpdate(nextProps) {
-        return !shallowEqual(this.props, nextProps)
-    }
 
     render() {
         return renderFn(this.props)

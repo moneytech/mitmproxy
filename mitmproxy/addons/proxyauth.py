@@ -1,5 +1,6 @@
 import binascii
 import weakref
+import ldap3
 from typing import Optional
 from typing import MutableMapping  # noqa
 from typing import Tuple
@@ -46,11 +47,25 @@ class ProxyAuth:
         self.nonanonymous = False
         self.htpasswd = None
         self.singleuser = None
-        self.authenticated = weakref.WeakKeyDictionary()  # type: MutableMapping[connections.ClientConnection, Tuple[str, str]]
+        self.ldapconn = None
+        self.ldapserver = None
+        self.authenticated: MutableMapping[connections.ClientConnection, Tuple[str, str]] = weakref.WeakKeyDictionary()
         """Contains all connections that are permanently authenticated after an HTTP CONNECT"""
 
+    def load(self, loader):
+        loader.add_option(
+            "proxyauth", Optional[str], None,
+            """
+            Require proxy authentication. Format:
+            "username:pass",
+            "any" to accept any user/pass combination,
+            "@path" to use an Apache htpasswd file,
+            or "ldap[s]:url_server_ldap:dn_auth:password:dn_subtree" for LDAP authentication.
+            """
+        )
+
     def enabled(self) -> bool:
-        return any([self.nonanonymous, self.htpasswd, self.singleuser])
+        return any([self.nonanonymous, self.htpasswd, self.singleuser, self.ldapconn, self.ldapserver])
 
     def is_proxy_auth(self) -> bool:
         """
@@ -58,7 +73,7 @@ class ProxyAuth:
             - True, if authentication is done as if mitmproxy is a proxy
             - False, if authentication is done as if mitmproxy is a HTTP server
         """
-        return ctx.options.mode in ("regular", "upstream")
+        return ctx.options.mode == "regular" or ctx.options.mode.startswith("upstream:")
 
     def which_auth_header(self) -> str:
         if self.is_proxy_auth():
@@ -99,7 +114,18 @@ class ProxyAuth:
         elif self.htpasswd:
             if self.htpasswd.check_password(username, password):
                 return username, password
-
+        elif self.ldapconn:
+            if not username or not password:
+                return None
+            self.ldapconn.search(ctx.options.proxyauth.split(':')[4], '(cn=' + username + ')')
+            if self.ldapconn.response:
+                conn = ldap3.Connection(
+                    self.ldapserver,
+                    self.ldapconn.response[0]['dn'],
+                    password,
+                    auto_bind=True)
+                if conn:
+                    return username, password
         return None
 
     def authenticate(self, f: http.HTTPFlow) -> bool:
@@ -118,6 +144,7 @@ class ProxyAuth:
             self.nonanonymous = False
             self.singleuser = None
             self.htpasswd = None
+            self.ldapserver = None
             if ctx.options.proxyauth:
                 if ctx.options.proxyauth == "any":
                     self.nonanonymous = True
@@ -125,10 +152,35 @@ class ProxyAuth:
                     p = ctx.options.proxyauth[1:]
                     try:
                         self.htpasswd = passlib.apache.HtpasswdFile(p)
-                    except (ValueError, OSError) as v:
+                    except (ValueError, OSError):
                         raise exceptions.OptionsError(
                             "Could not open htpasswd file: %s" % p
                         )
+                elif ctx.options.proxyauth.startswith("ldap"):
+                    parts = ctx.options.proxyauth.split(':')
+                    if len(parts) != 5:
+                        raise exceptions.OptionsError(
+                            "Invalid ldap specification"
+                        )
+                    security = parts[0]
+                    ldap_server = parts[1]
+                    dn_baseauth = parts[2]
+                    password_baseauth = parts[3]
+                    if security == "ldaps":
+                        server = ldap3.Server(ldap_server, use_ssl=True)
+                    elif security == "ldap":
+                        server = ldap3.Server(ldap_server)
+                    else:
+                        raise exceptions.OptionsError(
+                            "Invalid ldap specification on the first part"
+                        )
+                    conn = ldap3.Connection(
+                        server,
+                        dn_baseauth,
+                        password_baseauth,
+                        auto_bind=True)
+                    self.ldapconn = conn
+                    self.ldapserver = server
                 else:
                     parts = ctx.options.proxyauth.split(':')
                     if len(parts) != 2:

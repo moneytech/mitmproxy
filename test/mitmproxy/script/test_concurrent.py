@@ -1,5 +1,6 @@
+import pytest
+
 from mitmproxy.test import tflow
-from mitmproxy.test import tutils
 from mitmproxy.test import taddons
 
 from mitmproxy import controller
@@ -15,10 +16,10 @@ class Thing:
 
 
 class TestConcurrent(tservers.MasterTest):
-    def test_concurrent(self):
+    def test_concurrent(self, tdata):
         with taddons.context() as tctx:
             sc = tctx.script(
-                tutils.test_data.path(
+                tdata.path(
                     "mitmproxy/data/addonscripts/concurrent_decorator.py"
                 )
             )
@@ -31,27 +32,28 @@ class TestConcurrent(tservers.MasterTest):
                     return
             raise ValueError("Script never acked")
 
-    def test_concurrent_err(self):
+    @pytest.mark.asyncio
+    async def test_concurrent_err(self, tdata):
         with taddons.context() as tctx:
             tctx.script(
-                tutils.test_data.path(
+                tdata.path(
                     "mitmproxy/data/addonscripts/concurrent_decorator_err.py"
                 )
             )
-            assert tctx.master.has_log("decorator not supported")
+            assert await tctx.master.await_log("decorator not supported")
 
-    def test_concurrent_class(self):
-            with taddons.context() as tctx:
-                sc = tctx.script(
-                    tutils.test_data.path(
-                        "mitmproxy/data/addonscripts/concurrent_decorator_class.py"
-                    )
+    def test_concurrent_class(self, tdata):
+        with taddons.context() as tctx:
+            sc = tctx.script(
+                tdata.path(
+                    "mitmproxy/data/addonscripts/concurrent_decorator_class.py"
                 )
-                f1, f2 = tflow.tflow(), tflow.tflow()
-                tctx.cycle(sc, f1)
-                tctx.cycle(sc, f2)
-                start = time.time()
-                while time.time() - start < 5:
-                    if f1.reply.state == f2.reply.state == "committed":
-                        return
-                raise ValueError("Script never acked")
+            )
+            f1, f2 = tflow.tflow(), tflow.tflow()
+            tctx.cycle(sc, f1)
+            tctx.cycle(sc, f2)
+            start = time.time()
+            while time.time() - start < 5:
+                if f1.reply.state == f2.reply.state == "committed":
+                    return
+            raise ValueError("Script never acked")

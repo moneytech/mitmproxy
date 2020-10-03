@@ -16,32 +16,23 @@ parameters are passed as the ``query`` keyword argument.
 import traceback
 from typing import Dict, Optional  # noqa
 from typing import List  # noqa
-from typing import Tuple  # noqa
 
 from mitmproxy import exceptions
 from mitmproxy.net import http
 from mitmproxy.utils import strutils
 from . import (
-    auto, raw, hex, json, xml_html, html_outline, wbxml, javascript, css,
-    urlencoded, multipart, image, query, protobuf
+    auto, raw, hex, json, xml_html, wbxml, javascript, css,
+    urlencoded, multipart, image, query, protobuf, msgpack
 )
-from .base import View, VIEW_CUTOFF, KEY_MAX, format_text, format_dict
+from .base import View, KEY_MAX, format_text, format_dict, TViewResult
 
-views = []  # type: List[View]
-content_types_map = {}  # type: Dict[str, List[View]]
-view_prompts = []  # type: List[Tuple[str, str]]
+views: List[View] = []
+content_types_map: Dict[str, List[View]] = {}
 
 
 def get(name: str) -> Optional[View]:
     for i in views:
         if i.name.lower() == name.lower():
-            return i
-    return None
-
-
-def get_by_shortcut(c: str) -> Optional[View]:
-    for i in views:
-        if i.prompt[1] == c:
             return i
     return None
 
@@ -52,18 +43,11 @@ def add(view: View) -> None:
         if i.name == view.name:
             raise exceptions.ContentViewException("Duplicate view: " + view.name)
 
-    # TODO: the UI should auto-prompt for a replacement shortcut
-    for prompt in view_prompts:
-        if prompt[1] == view.prompt[1]:
-            raise exceptions.ContentViewException("Duplicate view shortcut: " + view.prompt[1])
-
     views.append(view)
 
     for ct in view.content_types:
         l = content_types_map.setdefault(ct, [])
         l.append(view)
-
-    view_prompts.append(view.prompt)
 
 
 def remove(view: View) -> None:
@@ -74,7 +58,6 @@ def remove(view: View) -> None:
         if not len(l):
             del content_types_map[ct]
 
-    view_prompts.remove(view.prompt)
     views.remove(view)
 
 
@@ -92,7 +75,7 @@ def safe_to_print(lines, encoding="utf8"):
         yield clean_line
 
 
-def get_message_content_view(viewname, message):
+def get_message_content_view(viewname, message, flow):
     """
     Like get_content_view, but also handles message encoding.
     """
@@ -120,6 +103,8 @@ def get_message_content_view(viewname, message):
         metadata["query"] = message.query
     if isinstance(message, http.Message):
         metadata["headers"] = message.headers
+    metadata["message"] = message
+    metadata["flow"] = flow
 
     description, lines, error = get_content_view(
         viewmode, content, **metadata
@@ -127,6 +112,19 @@ def get_message_content_view(viewname, message):
 
     if enc:
         description = "{} {}".format(enc, description)
+
+    return description, lines, error
+
+
+def get_tcp_content_view(viewname: str, data: bytes):
+    viewmode = get(viewname)
+    if not viewmode:
+        viewmode = get("auto")
+
+    # https://github.com/mitmproxy/mitmproxy/pull/3970#issuecomment-623024447
+    assert viewmode
+
+    description, lines, error = get_content_view(viewmode, data)
 
     return description, lines, error
 
@@ -152,7 +150,9 @@ def get_content_view(viewmode: View, data: bytes, **metadata):
     # Third-party viewers can fail in unexpected ways...
     except Exception:
         desc = "Couldn't parse: falling back to Raw"
-        _, content = get("Raw")(data, **metadata)
+        raw = get("Raw")
+        assert raw
+        content = raw(data, **metadata)[1]
         error = "{} Content viewer failed: \n{}".format(
             getattr(viewmode, "name"),
             traceback.format_exc()
@@ -168,7 +168,6 @@ add(hex.ViewHex())
 add(json.ViewJSON())
 add(xml_html.ViewXmlHtml())
 add(wbxml.ViewWBXML())
-add(html_outline.ViewHTMLOutline())
 add(javascript.ViewJavaScript())
 add(css.ViewCSS())
 add(urlencoded.ViewURLEncoded())
@@ -176,9 +175,9 @@ add(multipart.ViewMultipart())
 add(image.ViewImage())
 add(query.ViewQuery())
 add(protobuf.ViewProtobuf())
+add(msgpack.ViewMsgPack())
 
 __all__ = [
-    "View", "VIEW_CUTOFF", "KEY_MAX", "format_text", "format_dict",
-    "get", "get_by_shortcut", "add", "remove",
-    "get_content_view", "get_message_content_view",
+    "View", "KEY_MAX", "format_text", "format_dict", "TViewResult",
+    "get", "add", "remove", "get_content_view", "get_message_content_view",
 ]

@@ -1,44 +1,18 @@
 import urwid
 import blinker
 import textwrap
-from mitmproxy.tools.console import common
+
+from mitmproxy import command
+from mitmproxy.tools.console import layoutwidget
 from mitmproxy.tools.console import signals
 
 HELP_HEIGHT = 5
-
-
-footer = [
-    ('heading_key', "enter"), ":edit ",
-    ('heading_key', "?"), ":help ",
-]
-
-
-def _mkhelp():
-    text = []
-    keys = [
-        ("enter", "execute command"),
-    ]
-    text.extend(common.format_keyvals(keys, key="key", val="text", indent=4))
-    return text
-
-
-help_context = _mkhelp()
-
-
-def fcol(s, width, attr):
-    s = str(s)
-    return (
-        "fixed",
-        width,
-        urwid.Text((attr, s))
-    )
-
 
 command_focus_change = blinker.Signal()
 
 
 class CommandItem(urwid.WidgetWrap):
-    def __init__(self, walker, cmd, focused):
+    def __init__(self, walker, cmd: command.Command, focused: bool):
         self.walker, self.cmd, self.focused = walker, cmd, focused
         super().__init__(None)
         self._w = self.get_widget()
@@ -46,15 +20,18 @@ class CommandItem(urwid.WidgetWrap):
     def get_widget(self):
         parts = [
             ("focus", ">> " if self.focused else "   "),
-            ("title", self.cmd.path),
-            ("text", " "),
-            ("text", " ".join(self.cmd.paramnames())),
+            ("title", self.cmd.name)
         ]
-        if self.cmd.returntype:
-            parts.append([
+        if self.cmd.parameters:
+            parts += [
+                ("text", " "),
+                ("text", " ".join(str(param) for param in self.cmd.parameters)),
+            ]
+        if self.cmd.return_type:
+            parts += [
                 ("title", " -> "),
-                ("text", self.cmd.retname()),
-            ])
+                ("text", command.typename(self.cmd.return_type)),
+            ]
 
         return urwid.AttrMap(
             urwid.Padding(urwid.Text(parts)),
@@ -74,12 +51,13 @@ class CommandItem(urwid.WidgetWrap):
 class CommandListWalker(urwid.ListWalker):
     def __init__(self, master):
         self.master = master
-
         self.index = 0
-        self.focusobj = None
-        self.cmds = list(master.commands.commands.values())
+        self.refresh()
+
+    def refresh(self):
+        self.cmds = list(self.master.commands.commands.values())
         self.cmds.sort(key=lambda x: x.signature_help())
-        self.set_focus(0)
+        self.set_focus(self.index)
 
     def get_edit_text(self):
         return self.focus_obj.get_edit_text()
@@ -117,9 +95,15 @@ class CommandsList(urwid.ListBox):
         super().__init__(self.walker)
 
     def keypress(self, size, key):
-        if key == "enter":
+        if key == "m_select":
             foc, idx = self.get_focus()
-            signals.status_prompt_command.send(partial=foc.cmd.path + " ")
+            signals.status_prompt_command.send(partial=foc.cmd.name + " ")
+        elif key == "m_start":
+            self.set_focus(0)
+            self.walker._modified()
+        elif key == "m_end":
+            self.set_focus(len(self.walker.cmds) - 1)
+            self.walker._modified()
         return super().keypress(size, key)
 
 
@@ -145,7 +129,10 @@ class CommandHelp(urwid.Frame):
         self.set_body(self.widget(txt))
 
 
-class Commands(urwid.Pile):
+class Commands(urwid.Pile, layoutwidget.LayoutWidget):
+    title = "Command Reference"
+    keyctx = "commands"
+
     def __init__(self, master):
         oh = CommandHelp(master)
         super().__init__(
@@ -156,9 +143,11 @@ class Commands(urwid.Pile):
         )
         self.master = master
 
+    def layout_pushed(self, prev):
+        self.widget_list[0].walker.refresh()
+
     def keypress(self, size, key):
-        key = common.shortcuts(key)
-        if key == "tab":
+        if key == "m_next":
             self.focus_position = (
                 self.focus_position + 1
             ) % len(self.widget_list)

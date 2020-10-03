@@ -4,7 +4,7 @@ from mitmproxy.test import tflow
 from mitmproxy.net.http import Headers
 import mitmproxy.io
 from mitmproxy import flowfilter
-from mitmproxy.exceptions import Kill
+from mitmproxy.exceptions import Kill, ControlException
 from mitmproxy import flow
 from mitmproxy import http
 
@@ -24,7 +24,7 @@ class TestHTTPRequest:
         assert hash(r)
 
     def test_get_url(self):
-        r = http.HTTPRequest.wrap(mitmproxy.test.tutils.treq())
+        r = mitmproxy.test.tutils.treq()
 
         assert r.url == "http://address:22/path"
 
@@ -44,18 +44,8 @@ class TestHTTPRequest:
         assert r.url == "https://address:22/path"
         assert r.pretty_url == "https://foo.com:22/path"
 
-    def test_replace(self):
-        r = http.HTTPRequest.wrap(mitmproxy.test.tutils.treq())
-        r.path = "path/foo"
-        r.headers["Foo"] = "fOo"
-        r.content = b"afoob"
-        assert r.replace("foo(?i)", "boo") == 4
-        assert r.path == "path/boo"
-        assert b"foo" not in r.content
-        assert r.headers["boo"] == "boo"
-
     def test_constrain_encoding(self):
-        r = http.HTTPRequest.wrap(mitmproxy.test.tutils.treq())
+        r = mitmproxy.test.tutils.treq()
         r.headers["accept-encoding"] = "gzip, oink"
         r.constrain_encoding()
         assert "oink" not in r.headers["accept-encoding"]
@@ -65,7 +55,7 @@ class TestHTTPRequest:
         assert "oink" not in r.headers["accept-encoding"]
 
     def test_get_content_type(self):
-        resp = http.HTTPResponse.wrap(mitmproxy.test.tutils.tresp())
+        resp = mitmproxy.test.tutils.tresp()
         resp.headers = Headers(content_type="text/plain")
         assert resp.headers["content-type"] == "text/plain"
 
@@ -78,16 +68,8 @@ class TestHTTPResponse:
         resp2 = resp.copy()
         assert resp2.get_state() == resp.get_state()
 
-    def test_replace(self):
-        r = http.HTTPResponse.wrap(mitmproxy.test.tutils.tresp())
-        r.headers["Foo"] = "fOo"
-        r.content = b"afoob"
-        assert r.replace("foo(?i)", "boo") == 3
-        assert b"foo" not in r.content
-        assert r.headers["boo"] == "boo"
-
     def test_get_content_type(self):
-        resp = http.HTTPResponse.wrap(mitmproxy.test.tutils.tresp())
+        resp = mitmproxy.test.tutils.tresp()
         resp.headers = Headers(content_type="text/plain")
         assert resp.headers["content-type"] == "text/plain"
 
@@ -136,7 +118,7 @@ class TestHTTPFlow:
 
     def test_backup(self):
         f = tflow.tflow()
-        f.response = http.HTTPResponse.wrap(mitmproxy.test.tutils.tresp())
+        f.response = mitmproxy.test.tutils.tresp()
         f.request.content = b"foo"
         assert not f.modified()
         f.backup()
@@ -170,16 +152,31 @@ class TestHTTPFlow:
         assert not f == f2
         f2.error = flow.Error("e2")
         assert not f == f2
+        f2.backup()
+        f2.intercept()  # to change the state
         f.set_state(f2.get_state())
         assert f.get_state() == f2.get_state()
 
     def test_kill(self):
+        f = tflow.tflow()
+        with pytest.raises(ControlException):
+            f.intercept()
+            f.resume()
+            f.kill()
+
         f = tflow.tflow()
         f.intercept()
         assert f.killable
         f.kill()
         assert not f.killable
         assert f.reply.value == Kill
+
+    def test_intercept(self):
+        f = tflow.tflow()
+        f.intercept()
+        assert f.reply.state == "taken"
+        f.intercept()
+        assert f.reply.state == "taken"
 
     def test_resume(self):
         f = tflow.tflow()
@@ -188,47 +185,18 @@ class TestHTTPFlow:
         f.resume()
         assert f.reply.state == "committed"
 
-    def test_replace_unicode(self):
-        f = tflow.tflow(resp=True)
-        f.response.content = b"\xc2foo"
-        f.replace(b"foo", u"bar")
-
-    def test_replace_no_content(self):
+    def test_resume_duplicated(self):
         f = tflow.tflow()
-        f.request.content = None
-        assert f.replace("foo", "bar") == 0
+        f.intercept()
+        f2 = f.copy()
+        assert f.intercepted is f2.intercepted is True
+        f.resume()
+        f2.resume()
+        assert f.intercepted is f2.intercepted is False
 
-    def test_replace(self):
-        f = tflow.tflow(resp=True)
-        f.request.headers["foo"] = "foo"
-        f.request.content = b"afoob"
-
-        f.response.headers["foo"] = "foo"
-        f.response.content = b"afoob"
-
-        assert f.replace("foo", "bar") == 6
-
-        assert f.request.headers["bar"] == "bar"
-        assert f.request.content == b"abarb"
-        assert f.response.headers["bar"] == "bar"
-        assert f.response.content == b"abarb"
-
-    def test_replace_encoded(self):
-        f = tflow.tflow(resp=True)
-        f.request.content = b"afoob"
-        f.request.encode("gzip")
-        f.response.content = b"afoob"
-        f.response.encode("gzip")
-
-        f.replace("foo", "bar")
-
-        assert f.request.raw_content != b"abarb"
-        f.request.decode()
-        assert f.request.raw_content == b"abarb"
-
-        assert f.response.raw_content != b"abarb"
-        f.response.decode()
-        assert f.response.raw_content == b"abarb"
+    def test_timestamp_start(self):
+        f = tflow.tflow()
+        assert f.timestamp_start == f.request.timestamp_start
 
 
 def test_make_error_response():
@@ -250,5 +218,6 @@ def test_make_connect_response():
 
 
 def test_expect_continue_response():
-    assert http.expect_continue_response.http_version == 'HTTP/1.1'
-    assert http.expect_continue_response.status_code == 100
+    resp = http.make_expect_continue_response()
+    assert resp.http_version == 'HTTP/1.1'
+    assert resp.status_code == 100
